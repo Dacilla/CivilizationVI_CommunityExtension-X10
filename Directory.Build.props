@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- LOCAL SPIKE BUILD ONLY (not upstream): the vendored asmjit 1.13.0
+     deprecates BaseMem::setSize, which CE sources still use, and the vcxproj
+     enables SDL checks (C4996-as-error). Newer MSVC enforces this where the
+     author's toolchain did not. Disable only that deprecation locally. -->
+<Project>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <SDLCheck>false</SDLCheck>
+      <DisableSpecificWarnings>4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <Link>
+      <!-- LOCAL SPIKE BUILD ONLY: capstone static lib built from source;
+           upstream expects prebuilt libs in lib\$(Configuration). -->
+      <AdditionalDependencies>capstone.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>

@@ -25,6 +25,7 @@
 #include "AI.h"
 #include "EventSystems.h"
 #include "NationalParks.h"
+#include "X10Lifecycle.h"
 
 HANDLE mainThread;
 
@@ -61,6 +62,8 @@ void __cdecl Hook_RegisterScriptData(hks::lua_State* L) {
     std::cout << "Registering lua globals!\n";
 
     PushSharedGlobals(L);
+    CCallWithErrorHandling(L, X10Lifecycle::Register, NULL);
+    X10Lifecycle::LogGameplayLuaInit();
     CCallWithErrorHandling(L, CityTradeManager::Register, NULL);
     CCallWithErrorHandling(L, CultureManager::Register, NULL);
     CCallWithErrorHandling(L, EmergencyManager::Register, NULL);
@@ -128,6 +131,7 @@ static void InitHooks() {
     AI::CongressSupport::Create();
     AI::Espionage::Create();
     NationalParks::Create();
+    X10Lifecycle::Install(Runtime::GameCoreAddress);
 
     std::cout << "Hooks initialized!\n";
 }
