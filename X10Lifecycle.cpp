@@ -269,9 +269,25 @@ namespace X10Lifecycle {
         return 0;
     }
 
+    int LuaLogMsg(hks::lua_State* L) {
+        const char* s = hks::tolstring(L, 1, nullptr);
+        FILE* f = nullptr;
+        char tmp[MAX_PATH] = {};
+        DWORD n = GetTempPathA(sizeof(tmp), tmp);
+        char path[MAX_PATH] = {};
+        snprintf(path, sizeof(path), "%sX10Probe.log", n ? tmp : ".\\");
+        f = fopen(path, "a");
+        if (f) {
+            fprintf(f, "%s\n", s ? s : "(nil)");
+            fclose(f);
+        }
+        return 0;
+    }
+
     int Register(hks::lua_State* L) {
-        hks::createtable(L, 0, 1);
+        hks::createtable(L, 0, 2);
         PushLuaMethod(L, LuaPing, "LuaPing", -2, "Ping");
+        PushLuaMethod(L, LuaLogMsg, "LuaLogMsg", -2, "LogMsg");
         hks::setfield(L, hks::LUA_GLOBAL, "X10Lifecycle");
         return 0;
     }

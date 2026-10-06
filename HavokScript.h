@@ -74,6 +74,8 @@ namespace hks {
 	extern hksi_lua_tonumberType tonumber;
 	typedef int(__cdecl* hksi_lua_isuserdataType)(hks::lua_State*, int);
 	extern hksi_lua_isuserdataType isuserdata;
+	typedef const char* (__cdecl* hksi_lua_tolstringType)(hks::lua_State*, int, size_t*);
+	extern hksi_lua_tolstringType tolstring;
 
 	extern int checkplayerid(lua_State*, int);
 	extern void pushboolean(lua_State* L, bool value);

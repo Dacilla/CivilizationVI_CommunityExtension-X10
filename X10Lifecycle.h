@@ -22,4 +22,7 @@ namespace X10Lifecycle {
     // Lua-callable liveness ping from the probe gameplay script.
     int LuaPing(struct hks::lua_State* L);
     int Register(struct hks::lua_State* L);
+    // Tiny file-log helper for probe Lua: X10Lifecycle.LogMsg(str) appends
+    // one line to %TEMP%\X10Probe.log. No game state touched.
+    int LuaLogMsg(struct hks::lua_State* L);
 }
