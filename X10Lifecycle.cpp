@@ -23,12 +23,14 @@
 //   DynamicModifier ctor 0x92a4f0/0x92b220 : void(this, gameFx&, owner&,
 //       definition&, collection&, effect&)
 #include "X10Lifecycle.h"
+#include "X10Write.h"
 #include "HavokScript.h"
 #include "MinHook.h"
 #include <windows.h>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <cstdarg>
 
 #define X10_VERSION "x10-lifecycle-log 1 (logging only, 2026-10-07)"
 
@@ -156,6 +158,12 @@ namespace X10Lifecycle {
         void __cdecl Hook_Populate(void* pDB, void* modifierSystem) {
             InterlockedIncrement(&s_populateDepth);
             Log("PopulateModifierDefinitions ENTER depth=%ld", s_populateDepth);
+            double k = 0;
+            if (X10Config::TryGetProbeK(k)) {
+                X10Write::Arm(k);
+            } else {
+                Log("X10 writes DISABLED for this session (no native k)");
+            }
             orig_Populate(pDB, modifierSystem);
             Log("PopulateModifierDefinitions EXIT depth=%ld definitions_added=%ld",
                 s_populateDepth, s_addCount);
@@ -167,6 +175,7 @@ namespace X10Lifecycle {
             if (n <= 3 || n % 1000 == 0)
                 Log("AddModifierDefinition #%ld", n);
             orig_Add(self, d0, d1);
+            X10Write::OnAddModifierDefinition(self);
         }
 
         void __thiscall Hook_InstanceA(void* self, void* gameFx, void* owner,
@@ -195,6 +204,7 @@ namespace X10Lifecycle {
 
     bool Install(uintptr_t gameCoreBase) {
         s_base = gameCoreBase;
+        X10Write::InitBase(gameCoreBase);
         Log("X10 CE lifecycle test " X10_VERSION);
         Log("assumed GameCore build: 15038592 (reference `cur` column)");
 
@@ -261,6 +271,19 @@ namespace X10Lifecycle {
 
     void LogGameplayLuaInit() {
         Log("X10 gameplay Lua initialized (RegisterScriptData)");
+    }
+
+    void X10Log(const char* fmt, ...) {
+        OpenLog();
+        if (!s_log) return;
+        LONG id = InterlockedIncrement(&s_seq);
+        fprintf(s_log, "%06ld ", id);
+        va_list ap;
+        va_start(ap, fmt);
+        vfprintf(s_log, fmt, ap);
+        va_end(ap);
+        fprintf(s_log, "\n");
+        fflush(s_log);
     }
 
     int LuaPing(hks::lua_State* L) {

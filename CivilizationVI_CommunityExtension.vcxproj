@@ -288,6 +288,7 @@
     <ClCompile Include="Runtime.cpp" />
     <ClCompile Include="Unit.cpp" />
     <ClCompile Include="X10Lifecycle.cpp" />
+    <ClCompile Include="X10Write.cpp" />
     <ClCompile Include="UnitManager.cpp" />
   </ItemGroup>
   <ItemGroup>
