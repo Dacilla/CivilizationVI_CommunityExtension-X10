@@ -1,8 +1,7 @@
-// X10 lifecycle instrumentation (logging only).
-// Hooks GameEffects definition/attach pipeline entry points to establish the
-// relative order of: PopulateModifierDefinitions -> AddModifierDefinition ->
-// gameplay Lua init -> first modifier instantiation.
-// No writes, no gameplay changes, no RegisterProcessor use.
+// X10 native write test: lifecycle instrumentation + definition overrides.
+// Hooks GameEffects definition pipeline to establish ordering, then rewrites
+// SSO-inline modifier arguments pre-attach (fail-closed throughout).
+// No RegisterProcessor use.
 //
 // Hook set is minimal: Populate (phase boundaries), Add (definitions entering
 // the system), DynamicModifier ctors A/B (first instantiation). The

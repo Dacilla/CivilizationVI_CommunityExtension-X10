@@ -32,7 +32,7 @@
 #include <cstring>
 #include <cstdarg>
 
-#define X10_VERSION "x10-lifecycle-log 1 (logging only, 2026-10-07)"
+#define X10_VERSION "x10-write-test 2 (definition overrides, 2026-10-07)"
 
 namespace X10Lifecycle {
     namespace {
@@ -52,7 +52,9 @@ namespace X10Lifecycle {
             DWORD n = GetTempPathA(sizeof(tmp), tmp);
             char path[MAX_PATH] = {};
             snprintf(path, sizeof(path), "%sX10Lifecycle.log", n ? tmp : ".\\");
-            s_log = fopen(path, "w");
+            // Append, never truncate: a save/reload cycle must preserve both
+            // population sequences. Each Install writes a session header.
+            s_log = fopen(path, "a");
         }
 
         void Log(const char* fmt, ...) {
@@ -220,7 +222,8 @@ namespace X10Lifecycle {
     bool Install(uintptr_t gameCoreBase) {
         s_base = gameCoreBase;
         X10Write::InitBase(gameCoreBase);
-        Log("X10 CE lifecycle test " X10_VERSION);
+        Log("===== X10 native session =====");
+        Log("X10 CE native write test " X10_VERSION);
         Log("assumed GameCore build: 15038592 (reference `cur` column)");
 
         PeInfo pi = ReadPe(gameCoreBase);
