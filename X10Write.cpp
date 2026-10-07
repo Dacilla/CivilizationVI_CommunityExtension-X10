@@ -3,14 +3,17 @@
 // Reference basis (civ6-gamecore-reference, `cur` column, build 15038592):
 //   Configuration::Game::GetInstance ............ 0x164c20 (global read)
 //   string hash ................................. 0x606270 (rcx=str -> eax)
-//   Data::TypedVariantMap::FindVariant .......... 0x99f570 (map, key -> node+0x28 | NULL)
-// Map: root=[map+0x40], sentinel=map+0x30; node: left+0x0, right+0x8,
-// key(dword)+0x20, value=node+0x28. Instance: gameMap=[inst+0x88],
-// rootMap=[inst+0x80] (Windows-validated via GetGameSpeedType/operator=).
-// Variant: u16 type@+0x0, payload@+0x8; int pattern validated against the
-// GetGameSpeedType mask (ids<=0x15 in 0x30002e). String payloads are read as
-// C strings ONLY after strict validation (printable, NUL-terminated <=64,
-// strtod-clean, finite, in range); anything else fails closed.
+//   Variant lookup: virtual method at vtable+0x68(manager, keyHash), exactly
+//     as GetGameSpeedType/GetGameMode/GetStartEra call it. The qwords at
+//     inst+0x88 (game variants) / inst+0x80 (root variants) are MANAGER
+//     OBJECTS (their first qword is a vtable), NOT raw maps: calling
+//     TypedVariantMap::FindVariant on them walks the wrong object.
+// Instance: gameMgr=[inst+0x88], rootMgr=[inst+0x80] (Windows-validated via
+// the getters above). Variant: u16 type@+0x0, payload@+0x8;
+// int pattern validated against the GetGameSpeedType mask (ids<=0x15 in
+// 0x30002e). String payloads are read as objects ONLY after strict layout
+// validation (printable, NUL-terminated <=64, strtod-clean, finite, in
+// range); anything else fails closed with type/flags/payload logged.
 //
 // ArgumentDefinition (cross-checked: 2 ctors, 2 find loops, TryGetValue):
 //   sizeof = 0xA0; name = SSO string @+0x00; value = SSO string @+0x20.
@@ -28,8 +31,6 @@
 #include <cmath>
 #include "X10Lifecycle.h"
 
-extern void X10Lifecycle::X10Log(const char* fmt, ...);
-
 namespace {
     uintptr_t g_base = 0;
 
@@ -41,54 +42,66 @@ namespace {
     // ---- config reader ----
     typedef void* (__cdecl* GetInstanceFn)();
     typedef uint32_t(__cdecl* HashFn)(const char* s);
-    typedef void* (__cdecl* FindVariantFn)(void* map, uint32_t key);
+    // Virtual variant lookup, replicating GetGameSpeedType exactly:
+    // manager = *(inst+off); variant = manager->vtable[0x68/8](manager, key).
+    typedef void* (__cdecl* LookupFn)(void* manager, uint32_t key);
 
-    bool ReadCString(const void* strObj, char* out, size_t cap) {
+    static void* LookupVariant(void* manager, uint32_t key) {
         __try {
-            const uint8_t* p = reinterpret_cast<const uint8_t*>(strObj);
-            uint64_t size = *reinterpret_cast<const uint64_t*>(p + 0x10);
-            uint64_t capa = *reinterpret_cast<const uint64_t*>(p + 0x18);
-            const char* data = (capa < 0x10) ? reinterpret_cast<const char*>(p)
-                                            : *reinterpret_cast<const char* const*>(p);
-            if (size > 64) return false;
-            for (uint64_t i = 0; i < size; i++) {
-                char c = data[i];
-                if (c < 32 || c > 126) return false;
-            }
-            if (data[size] != '\0') return false;
-            if (size + 1 > cap) return false;
-            memcpy(out, data, (size_t)size + 1);
-            return true;
+            if (!manager) return nullptr;
+            void* vt = *reinterpret_cast<void**>(manager);
+            if (!vt) return nullptr;
+            void* fn = reinterpret_cast<void**>(vt)[0x68 / 8];
+            if (!fn) return nullptr;
+            return reinterpret_cast<LookupFn>(fn)(manager, key);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return false;
+            return nullptr;
         }
     }
 
+    // NOTE: there is deliberately no generic string-object reader on the
+    // config path. Unknown variant types fail closed (see default branch).
+
     // Typed switch over the engine's scalar variant representations.
-    // INT32: proven by the GetGameSpeedType/GetGameMode mask (ids<=0x15 in
-    //   0x30002e, flags bit 0x1d clear), payload dword@+8.
-    // STRING: payload is a string OBJECT at +8 with the engine string layout
-    //   confirmed independently in ArgumentDefinition/TryGetValue RE
-    //   (size@+0x10, capacity@+0x18, SSO-inline iff capacity<0x10). Accepted
-    //   only with strict validation (printable, NUL-terminated, strtod-clean,
-    //   finite, in range). FLOAT32/FLOAT64 type ids are NOT established: no
-    //   float-domain setup parameter exists and no float construction site
-    //   was found, so there is deliberately no float branch. Anything else:
-    //   fail closed with the exact type id / flags / payload logged.
-    // The accepted type id is ALWAYS logged, so the first live run proves
-    // which representation X10_PROBE_K actually uses.
+    // Provenance:
+    //  INT32: GetGameSpeedType/GetGameMode mask (ids<=0x15 in 0x30002e,
+    //    flags bit 0x1d clear), payload dword@+8. NOTE id 4 is EXCLUDED
+    //    below even though the mask contains it: the engine's own callers
+    //    only pass int-typed keys there, while fractional Lua numbers are
+    //    stored as float32 (cvtsd2ss + virtual store, TableToTypedVariantMap
+    //    0x9af376), so id 4 must decode as float, never as int bits.
+    //  FLOAT32 id=4: fractional setup values are committed as float32
+    //    (live: 7.3000001907349 == float32(7.3) widened; no cvtss2sd-free
+    //    alternative exists; type-name table order Bool,Int,UInt,Float,...).
+    //    Payload float@+8, widened to double, finite + range checked.
+    //  Anything else (incl. strings — no string-typed setup value is in
+    //  play for this key): fail closed with exact type id / flags / payload
+    //  logged. Unknown types are NEVER passed through a string reader.
     static bool VariantToDouble(void* variant, double& out,
-                                unsigned& typeOut, uint32_t& flagsOut) {
+                                unsigned& typeOut, uint32_t& flagsOut,
+                                const char** kindOut) {
         typeOut = 0xFFFF;
         flagsOut = 0;
+        *kindOut = "unknown";
         __try {
             uint8_t* v = reinterpret_cast<uint8_t*>(variant);
             uint16_t type = *reinterpret_cast<uint16_t*>(v);
             uint32_t flags = *reinterpret_cast<uint32_t*>(v + 0x14);
             typeOut = type;
             flagsOut = flags;
+            if (type == 4) {
+                float f = 0;
+                memcpy(&f, v + 8, sizeof(f));
+                if (f == f && f >= 0 && f <= 100) {
+                    out = (double)f;
+                    *kindOut = "FLOAT32";
+                    return true;
+                }
+                return false; // non-finite/out-of-range float: fail closed
+            }
             if (!((flags >> 0x1d) & 1) && type <= 0x15 && ((0x30002e >> type) & 1)) {
                 out = (double)*reinterpret_cast<int32_t*>(v + 8);
+                *kindOut = "INT32";
                 return true; // INT32
             }
             return false;
@@ -103,7 +116,6 @@ namespace X10Config {
         out = 0;
         auto getInstance = At<GetInstanceFn>(0x164c20);
         auto hashFn = At<HashFn>(0x606270);
-        auto findVariant = At<FindVariantFn>(0x99f570);
         void* inst = nullptr;
         __try {
             inst = getInstance();
@@ -133,7 +145,7 @@ namespace X10Config {
             if (!map) continue;
             void* variant = nullptr;
             __try {
-                variant = findVariant(map, key);
+                variant = LookupVariant(map, key);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 continue;
             }
@@ -141,46 +153,24 @@ namespace X10Config {
             double d = 0;
             unsigned vtype = 0xFFFF;
             uint32_t vflags = 0;
-            if (VariantToDouble(variant, d, vtype, vflags)) {
+            const char* kind = "unknown";
+            if (VariantToDouble(variant, d, vtype, vflags, &kind)) {
                 if (d >= 0 && d <= 100 && d == d) {
                     out = d;
-                    X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true type=INT32 id=%u flags=0x%x numeric=%f", vtype, vflags, d);
+                    X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true type=%s id=%u flags=0x%x numeric=%.15g", kind, vtype, vflags, d);
                     return true;
                 }
-                X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true type=INT32 id=%u raw=%f reason=out-of-range", vtype, d);
+                X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true type=%s id=%u raw=%f reason=out-of-range", kind, vtype, d);
                 return false;
             }
-            char buf[72] = {};
-            // STRING branch (see switch comment above): payload object at +8.
-            bool ok = false;
-            __try {
-                uint8_t* v = reinterpret_cast<uint8_t*>(variant);
-                void* payload = *reinterpret_cast<void**>(v + 8);
-                ok = payload && ReadCString(payload, buf, sizeof(buf));
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                ok = false;
-            }
-            if (ok) {
-                char* end = nullptr;
-                double dd = strtod(buf, &end);
-                if (end != buf && *end == '\0' && dd == dd && dd >= 0 && dd <= 100) {
-                    out = dd;
-                    X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true type=STRING id=%u flags=0x%x raw=%s numeric=%f", vtype, vflags, buf, dd);
-                    return true;
-                }
-                X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true reason=unparseable-string id=%u raw=%s", vtype, buf);
-                return false;
-            }
-            X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true reason=unreadable-variant-type");
+            X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true reason=undecodable-variant id=%u flags=0x%x", vtype, vflags);
             // Report exact type/flags/payload for the next static iteration.
             __try {
                 uint8_t* v = reinterpret_cast<uint8_t*>(variant);
-                uint16_t type = *reinterpret_cast<uint16_t*>(v);
-                uint32_t flags = *reinterpret_cast<uint32_t*>(v + 0x14);
                 uint8_t b[16] = {};
                 memcpy(b, v + 8, sizeof(b));
                 X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K variant type=%u flags=0x%x payload=%02x%02x%02x%02x%02x%02x%02x%02x...",
-                       (unsigned)type, flags, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+                       vtype, vflags, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
             }
             return false;
