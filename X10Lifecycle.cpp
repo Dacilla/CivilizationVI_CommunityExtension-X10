@@ -173,10 +173,11 @@ namespace X10Lifecycle {
             // leaves writes=0 even if an earlier game in this process armed.
             X10Write::Disarm();
             double k = 0;
+            double kErr = 0;
             // Production multiplier (probe key still honored for experiments).
-            bool haveK = X10Config::TryGetConfigDouble("X10_MULTIPLIER", k);
+            bool haveK = X10Config::TryGetMultiplier("X10_MULTIPLIER", k, kErr);
             if (!haveK)
-                haveK = X10Config::TryGetProbeK(k);
+                haveK = X10Config::TryGetProbeKEx(k, kErr);
             if (haveK && k == 0) {
                 Log("X10 multiplier 0: controller OFF (definitions untouched)");
                 haveK = false;
@@ -199,7 +200,7 @@ namespace X10Lifecycle {
                         Log("X10_MODULE_%s requested ON but unsupported in this build; ignored", m);
                     }
                 }
-                X10Write::Arm(k, mods);
+                X10Write::Arm(k, mods, kErr);
             } else {
                 Log("X10 writes DISABLED for this session (no native k)");
             }

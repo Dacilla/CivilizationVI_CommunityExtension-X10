@@ -11,8 +11,12 @@
 namespace X10Config {
     // Generic validated config-double reader. Logs CONFIG lines either way.
     bool TryGetConfigDouble(const char* key, double& out);
+    // Multiplier read with source quantization: kErrOut is the FLOAT32
+    // half-ULP of the stored k (0 for INT32 multipliers).
+    bool TryGetMultiplier(const char* key, double& out, double& kErrOut);
     // Probe compat (X10_PROBE_K).
     bool TryGetProbeK(double& out);
+    bool TryGetProbeKEx(double& out, double& kErrOut);
     // Module toggle: numeric 1/0; absent key means default-ON (matching the
     // mod's declared defaults) and is logged.
     bool ModuleEnabled(const char* moduleKey, bool defaultOn);
@@ -35,8 +39,11 @@ namespace X10Write {
     // Post-Add witness: re-read every touched element from the live definition.
     void VerifyStoredAfterAdd(Touched* touched, int count);
     // Must be called after config lookup succeeds; enables the write path.
+    // kErr carries the multiplier's source quantization (FLOAT32 half-ULP,
+    // 0 for INT32) for the count-like exactness rule.
     void Arm(double k);
     void Arm(double k, const bool* mods);
+    void Arm(double k, const bool* mods, double kErr);
     // Fail-closed reset at the start of EVERY PopulateModifierDefinitions:
     // clears armed state, k, module flags, and per-population counters.
     void Disarm();

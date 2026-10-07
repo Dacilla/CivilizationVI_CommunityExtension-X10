@@ -17,9 +17,13 @@ namespace X10Transforms {
 
     // Returns false when the transform is undefined for the input.
     // countLike: result must be integral; fractional outcomes are refused
-    // (DECISION_REQUIRED), never floored.
-    inline bool Apply(int kind, double official, double k, bool countLike,
-                      char* out, size_t cap) {
+    // (DECISION_REQUIRED), never floored. kErr is the source quantization
+    // half-ULP of k (0 for INT32 multipliers): a count-like result may round
+    // to integer n only when |v-n| <= |official|*kErr + double-rounding
+    // allowance, so stored-FLOAT32 k (e.g. 7.300000190734863) still accepts
+    // exact 10->73 while refusing genuine fractions like 3->21.9.
+    inline bool Apply(int kind, double official, double k, double kErr,
+                      bool countLike, char* out, size_t cap) {
         if (!(k == k) || k < 0 || k > 100) return false;
         double v = 0;
         const char* fmt = "%.6g";
@@ -59,7 +63,10 @@ namespace X10Transforms {
         if (!FiniteSane(v)) return false;
         if (countLike) {
             double r = round(v);
-            if (v != r) return false; // fractional count: refused, not floored
+            // FLOAT32-quantization-aware exactness: tolerate only the
+            // propagated source error of k, never a coarse epsilon.
+            double tol = fabs(official) * kErr + 1e-9 * fmax(1.0, fabs(v));
+            if (!(tol < 0.5) || fabs(v - r) > tol) return false;
             v = r;
         }
         snprintf(out, cap, fmt, v);

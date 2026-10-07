@@ -80,7 +80,11 @@ namespace {
     //  logged. Unknown types are NEVER passed through a string reader.
     static bool VariantToDouble(void* variant, double& out,
                                 unsigned& typeOut, uint32_t& flagsOut,
-                                const char** kindOut) {
+                                const char** kindOut, bool* isFloatOut = nullptr) {
+        typeOut = 0xFFFF;
+        flagsOut = 0;
+        *kindOut = "unknown";
+        if (isFloatOut) *isFloatOut = false;
         typeOut = 0xFFFF;
         flagsOut = 0;
         *kindOut = "unknown";
@@ -98,6 +102,7 @@ namespace {
                 if (f == f && f >= 0 && f <= 100) {
                     out = (double)f;
                     *kindOut = "FLOAT32";
+                    if (isFloatOut) *isFloatOut = true;
                     return true;
                 }
                 return false; // non-finite/out-of-range float: fail closed
@@ -124,7 +129,17 @@ namespace {
 namespace X10Config {
     static void* FindConfigVariant(const char* key);
     bool TryGetConfigDouble(const char* key, double& out) {
+        double err = 0;
+        return TryGetMultiplier(key, out, err);
+    }
+
+    // Multiplier read with source quantization: kErr is the FLOAT32
+    // half-ULP of the stored k (0 for INT32 multipliers), consumed by the
+    // count-like exactness rule so stored-float k still accepts exact
+    // integer results without a coarse epsilon.
+    bool TryGetMultiplier(const char* key, double& out, double& kErrOut) {
         out = 0;
+        kErrOut = 0;
         void* variant = FindConfigVariant(key);
         if (!variant) {
             X10Lifecycle::X10Log("CONFIG key=%s found=false reason=absent-or-unreachable", key);
@@ -134,10 +149,19 @@ namespace X10Config {
             unsigned vtype = 0xFFFF;
             uint32_t vflags = 0;
             const char* kind = "unknown";
-            if (VariantToDouble(variant, d, vtype, vflags, &kind)) {
+            bool isFloat = false;
+            if (VariantToDouble(variant, d, vtype, vflags, &kind, &isFloat)) {
                 if (d >= 0 && d <= 100 && d == d) {
                     out = d;
-                    X10Lifecycle::X10Log("CONFIG key=%s found=true type=%s id=%u flags=0x%x numeric=%.15g", key, kind, vtype, vflags, d);
+                    if (isFloat) {
+                        float kf = (float)d;
+                        float hi = nextafterf(kf, INFINITY);
+                        float lo = nextafterf(kf, -INFINITY);
+                        double hiErr = (double)(hi - kf);
+                        double loErr = (double)(kf - lo);
+                        kErrOut = (hiErr > loErr ? hiErr : loErr) / 2.0;
+                    }
+                    X10Lifecycle::X10Log("CONFIG key=%s found=true type=%s id=%u flags=0x%x numeric=%.15g kerr=%.3g", key, kind, vtype, vflags, d, kErrOut);
                     return true;
                 }
                 X10Lifecycle::X10Log("CONFIG key=%s found=true type=%s id=%u raw=%f reason=out-of-range", key, kind, vtype, d);
@@ -199,6 +223,10 @@ namespace X10Config {
         return TryGetConfigDouble("X10_PROBE_K", out);
     }
 
+    bool TryGetProbeKEx(double& out, double& kErrOut) {
+        return TryGetMultiplier("X10_PROBE_K", out, kErrOut);
+    }
+
     bool ModuleEnabled(const char* moduleKey, bool defaultOn) {
         char full[96] = {};
         snprintf(full, sizeof(full), "X10_MODULE_%s", moduleKey);
@@ -231,6 +259,7 @@ namespace X10Write {
     // modifier IDs.
 
     static double g_k = 0;
+    static double g_kErr = 0; // source quantization half-ULP of g_k (0 = INT32)
     static bool g_armed = false;
     static bool s_modEnabled[3] = {true, true, true}; // traits, policies, governments
     static volatile LONG s_writesSession = 0;
@@ -238,21 +267,28 @@ namespace X10Write {
     static volatile LONG s_mismatchesPopulate = 0;
     static volatile LONG s_skippedPopulate = 0;
 
-    void Arm(double k, const bool* mods) {
+    void Arm(double k, const bool* mods, double kErr) {
         g_k = k;
+        g_kErr = kErr;
         g_armed = true;
         for (int i = 0; i < 3; i++) s_modEnabled[i] = mods[i];
     }
 
-    // Legacy single-arg arm (probe compat): all supported modules on.
+    void Arm(double k, const bool* mods) {
+        Arm(k, mods, 0.0);
+    }
+
+    // Legacy single-arg arm (probe compat): all supported modules on,
+    // zero quantization (strict integer exactness).
     void Arm(double k) {
         static const bool all[3] = {true, true, true};
-        Arm(k, all);
+        Arm(k, all, 0.0);
     }
 
     void Disarm() {
         g_armed = false;
         g_k = 0;
+        g_kErr = 0;
         s_writesPopulate = 0;
         s_mismatchesPopulate = 0;
         s_skippedPopulate = 0;
@@ -401,7 +437,8 @@ namespace X10Write {
                     char replacement[32] = {};
                     static const char* kNames[] = {"ADDITIVE", "COMBAT", "PROBABILITY", "DISCOUNT"};
                     const char* tname = (e.kind >= 0 && e.kind <= 3) ? kNames[e.kind] : "?";
-                    if (!X10Transforms::Apply(e.kind, official, g_k, e.countLike != 0,
+                    if (!X10Transforms::Apply(e.kind, official, g_k, g_kErr,
+                                              e.countLike != 0,
                                               replacement, sizeof(replacement))) {
                         InterlockedIncrement(&s_skippedPopulate);
                         X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s transform-refused kind=%s skipped",
