@@ -153,6 +153,17 @@ namespace X10Config {
                 return false;
             }
             X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true reason=unreadable-variant-type");
+            // Report exact type/flags/payload for the next static iteration.
+            __try {
+                uint8_t* v = reinterpret_cast<uint8_t*>(variant);
+                uint16_t type = *reinterpret_cast<uint16_t*>(v);
+                uint32_t flags = *reinterpret_cast<uint32_t*>(v + 0x14);
+                uint8_t b[16] = {};
+                memcpy(b, v + 8, sizeof(b));
+                X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K variant type=%u flags=0x%x payload=%02x%02x%02x%02x%02x%02x%02x%02x...",
+                       (unsigned)type, flags, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
             return false;
         }
         X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=false reason=absent-from-both-maps");
@@ -161,37 +172,64 @@ namespace X10Config {
 }
 
 namespace X10Write {
-    const Override kOverrides[3] = {
-        {"TRAIT_LINCOLN_INDUSTRIAL_ZONE_LOYALTY", "Amount", "3", 0},
+    // Test-only override table (official baseline values). The Rome entry is
+    // the guaranteed-active runtime witness (human plays Rome); the other
+    // three are definition-write proofs verified via stored_after_add.
+    const Override kOverrides[4] = {        {"TRAIT_LINCOLN_INDUSTRIAL_ZONE_LOYALTY", "Amount", "3", 0},
         {"AGOGE_ANCIENT_MELEE_PRODUCTION", "Amount", "50", 0},
         {"ALL_PARK_COMBAT_BONUS", "Amount", "5", 1},
+        {"TRAIT_GOLD_FROM_DOMESTIC_TRADING_POSTS", "Amount", "1", 0},
     };
 
     static double g_k = 0;
     static bool g_armed = false;
-    static volatile LONG s_writes = 0;
+    static volatile LONG s_writesSession = 0;
+    static volatile LONG s_writesPopulate = 0;
 
     void Arm(double k) {
         g_k = k;
         g_armed = true;
     }
 
+    void Disarm() {
+        g_armed = false;
+        g_k = 0;
+        s_writesPopulate = 0;
+    }
+
     bool IsArmed() { return g_armed; }
 
+    static bool BoundedStringRead(void* s, char* out, size_t cap,
+                                  size_t& lenOut);
+
     static bool SsoRead(void* s, char* out, size_t cap, size_t& lenOut) {
+        return BoundedStringRead(s, out, cap, lenOut);
+    }
+
+    // Bounded READ-ONLY string reader: SSO-inline and heap-backed (reads only;
+    // heap WRITES remain refused — see SsoWrite).
+    static bool BoundedStringRead(void* s, char* out, size_t cap,
+                                  size_t& lenOut) {
         __try {
             uint8_t* p = reinterpret_cast<uint8_t*>(s);
             uint64_t size = *reinterpret_cast<uint64_t*>(p + 0x10);
             uint64_t capa = *reinterpret_cast<uint64_t*>(p + 0x18);
-            if (capa >= 0x10) return false; // heap: never touch
-            if (size > 15) return false;
+            if (size > 256) return false;
+            const char* data = nullptr;
+            if (capa < 0x10) {
+                data = reinterpret_cast<const char*>(p);
+            } else {
+                if (capa < size) return false;
+                data = *reinterpret_cast<const char* const*>(p);
+                if (!data) return false;
+            }
             for (uint64_t i = 0; i < size; i++) {
-                char c = reinterpret_cast<char*>(p)[i];
+                char c = data[i];
                 if (c < 32 || c > 126) return false;
             }
-            if (reinterpret_cast<char*>(p)[size] != '\0') return false;
+            if (data[size] != '\0') return false;
             if (size + 1 > cap) return false;
-            memcpy(out, p, (size_t)size + 1);
+            memcpy(out, data, (size_t)size + 1);
             lenOut = (size_t)size;
             return true;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -217,23 +255,47 @@ namespace X10Write {
         }
     }
 
-    void OnAddModifierDefinition(void* definition) {
-        if (!g_armed) return;
+    // Resolves a ModifierDefinitionReference (shared_ptr-like {_Ptr, _Rep})
+    // to the raw SimpleModifierDefinition pointer. Fails closed (null).
+    // Evidence: AddModifierDefinition dereferences RDX+0 then virtual+0x10,
+    // and ref-counts via lock xadd on the second qword (shared_ptr control
+    // block uses@+8/weaks@+0xc) — see docs/NATIVE_HOOK_VALIDATION.md.
+    static void* ResolveDefinitionReference(void* d0, void* d1) {
+        (void)d1;
+        __try {
+            if (!d0) return nullptr;
+            void* def = *reinterpret_cast<void**>(d0);
+            if (!def) return nullptr;
+            // The definition must itself be a polymorphic object.
+            void* vt = *reinterpret_cast<void**>(def);
+            if (!vt) return nullptr;
+            return def;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return nullptr;
+        }
+    }
+
+    // Writes the first matching target element of one definition.
+    // Returns true and fills outEl/outExpected when a write happened.
+    static bool WriteDefinition(void* definition, void** outEl,
+                                char* outExpected, size_t expCap,
+                                const char** outId, const char** outArg) {
+        *outEl = nullptr;
         __try {
             uint8_t* def = reinterpret_cast<uint8_t*>(definition);
-            char id[128] = {};
+            static char id[256];
             size_t idLen = 0;
-            if (!SsoRead(def + 0x18, id, sizeof(id), idLen)) return; // id unreadable: skip
-            for (int t = 0; t < 3; t++) {
+            if (!SsoRead(def + 0x18, id, sizeof(id), idLen)) return false; // id unreadable: skip
+            for (int t = 0; t < kOverrideCount; t++) {
                 const Override& o = kOverrides[t];
                 if (strcmp(id, o.modifierId) != 0) continue;
                 // Argument vector at +0x40: {begin, end, cap}.
                 void** vec = reinterpret_cast<void**>(def + 0x40);
                 uint8_t* begin = reinterpret_cast<uint8_t*>(vec[0]);
                 uint8_t* end = reinterpret_cast<uint8_t*>(vec[1]);
-                if (!begin || !end || end < begin) return;
+                if (!begin || !end || end < begin) return false;
                 size_t count = (size_t)(end - begin) / 0xA0;
-                if (count > 64) return; // insane: skip definition
+                if (count == 0 || count > 64) return false; // insane: skip
                 for (size_t i = 0; i < count; i++) {
                     uint8_t* el = begin + i * 0xA0;
                     char name[64] = {};
@@ -254,9 +316,17 @@ namespace X10Write {
                     if (o.family == 1) {
                         transform = "COMBAT";
                         double v = 25.0 * log(g_k * (exp(official / 25.0) - 1.0) + 1.0);
+                        if (!(v == v) || v < 0 || v > 100000) {
+                            X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s non-finite combat result skipped", o.modifierId, o.argument);
+                            continue;
+                        }
                         snprintf(replacement, sizeof(replacement), "%.2f", v);
                     } else {
                         double v = official * g_k;
+                        if (!(v == v)) {
+                            X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s non-finite result skipped", o.modifierId, o.argument);
+                            continue;
+                        }
                         snprintf(replacement, sizeof(replacement), "%.6g", v);
                     }
                     if (!SsoWrite(el + 0x20, replacement)) {
@@ -266,14 +336,50 @@ namespace X10Write {
                     char after[64] = {};
                     size_t afterLen = 0;
                     SsoRead(el + 0x20, after, sizeof(after), afterLen);
-                    InterlockedIncrement(&s_writes);
+                    InterlockedIncrement(&s_writesSession);
+                    InterlockedIncrement(&s_writesPopulate);
                     X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s official=%s k=%.6g transform=%s requested=%s before=%s after=%s phase=definition-population",
                            o.modifierId, o.argument, o.official, g_k, transform, replacement, before, after);
+                    *outEl = el + 0x20;
+                    strncpy(outExpected, replacement, expCap - 1);
+                    *outId = o.modifierId;
+                    *outArg = o.argument;
+                    return true;
                 }
-                return; // id matched: done with this definition
+                return false; // id matched: done with this definition
             }
+            return false;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             X10Lifecycle::X10Log("[X10WRITE] fault during definition scan (skipped)");
+            return false;
+        }
+    }
+
+    void OnAddModifierDefinition(void* d0, void* d1,
+                                 void** outEl, char* outExpected, size_t expCap,
+                                 const char** outId, const char** outArg) {
+        *outEl = nullptr;
+        if (outExpected && expCap) outExpected[0] = '\0';
+        if (!g_armed) return;
+        void* definition = ResolveDefinitionReference(d0, d1);
+        if (!definition) {
+            X10Lifecycle::X10Log("[X10WRITE] unresolvable definition reference (skipped)");
+            return;
+        }
+        WriteDefinition(definition, outEl, outExpected, expCap, outId, outArg);
+    }
+
+    // Post-Add witness: re-read the touched element from the live definition.
+    void VerifyStoredAfterAdd(void* el, const char* expected,
+                              const char* id, const char* arg) {
+        char stored[64] = {};
+        size_t storedLen = 0;
+        if (el && SsoRead(el, stored, sizeof(stored), storedLen)) {
+            X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=%s expected=%s %s",
+                   id, arg, stored, expected,
+                   strcmp(stored, expected) == 0 ? "MATCH" : "MISMATCH");
+        } else {
+            X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=<unreadable>", id, arg);
         }
     }
 

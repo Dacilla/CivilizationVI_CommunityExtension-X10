@@ -21,11 +21,21 @@ namespace X10Write {
     };
     // Test-only table (official baseline values; replaced by manifest
     // generation once the path is proven).
-    extern const Override kOverrides[3];
-    // Called from the AddModifierDefinition hook with the definition pointer.
-    // Performs validated SSO-inline rewrites; logs [X10WRITE] per target.
-    void OnAddModifierDefinition(void* definition);
+    extern const Override kOverrides[4];
+    static const int kOverrideCount = 4;
+    // Called from the AddModifierDefinition hook with the raw reference
+    // slots (d0 = shared_ptr object). Resolves, writes BEFORE orig_Add, and
+    // reports the touched element for post-Add verification.
+    void OnAddModifierDefinition(void* d0, void* d1,
+                                 void** outEl, char* outExpected, size_t expCap,
+                                 const char** outId, const char** outArg);
+    // Post-Add witness: re-read the touched element from the live definition.
+    void VerifyStoredAfterAdd(void* el, const char* expected,
+                              const char* id, const char* arg);
     // Must be called after TryGetProbeK succeeds; enables the write path.
     void Arm(double k);
+    // Fail-closed reset at the start of EVERY PopulateModifierDefinitions:
+    // clears armed state, k, and the per-population write count.
+    void Disarm();
     bool IsArmed();
 }

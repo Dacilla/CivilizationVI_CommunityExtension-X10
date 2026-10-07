@@ -158,6 +158,9 @@ namespace X10Lifecycle {
         void __cdecl Hook_Populate(void* pDB, void* modifierSystem) {
             InterlockedIncrement(&s_populateDepth);
             Log("PopulateModifierDefinitions ENTER depth=%ld", s_populateDepth);
+            // Fail-closed reset FIRST: a failed lookup in any later game/load
+            // leaves writes=0 even if an earlier game in this process armed.
+            X10Write::Disarm();
             double k = 0;
             if (X10Config::TryGetProbeK(k)) {
                 X10Write::Arm(k);
@@ -174,8 +177,18 @@ namespace X10Lifecycle {
             LONG n = InterlockedIncrement(&s_addCount);
             if (n <= 3 || n % 1000 == 0)
                 Log("AddModifierDefinition #%ld", n);
+            // Write BEFORE orig_Add: the definition is fully constructed by
+            // the caller and not yet visible to the system, so ownership is
+            // clean and no shared-reference aliasing is relied upon.
+            void* el = nullptr;
+            char expected[32] = {};
+            const char* wid = "";
+            const char* warg = "";
+            X10Write::OnAddModifierDefinition(d0, d1, &el, expected,
+                                              sizeof(expected), &wid, &warg);
             orig_Add(self, d0, d1);
-            X10Write::OnAddModifierDefinition(self);
+            if (el)
+                X10Write::VerifyStoredAfterAdd(el, expected, wid, warg);
         }
 
         void __thiscall Hook_InstanceA(void* self, void* gameFx, void* owner,
