@@ -20,15 +20,20 @@ namespace X10Config {
 
 namespace X10Write {
     void InitBase(uintptr_t base);
+    // A touched argument, reported for post-Add verification.
+    struct Touched {
+        void* element;
+        char expected[32];
+        const char* id;
+        const char* arg;
+    };
     // Called from the AddModifierDefinition hook with the raw reference
     // slots (d0 = shared_ptr object). Resolves, writes BEFORE orig_Add, and
-    // reports the touched element for post-Add verification.
+    // reports all touched elements for post-Add verification.
     void OnAddModifierDefinition(void* d0, void* d1,
-                                 void** outEl, char* outExpected, size_t expCap,
-                                 const char** outId, const char** outArg);
-    // Post-Add witness: re-read the touched element from the live definition.
-    void VerifyStoredAfterAdd(void* el, const char* expected,
-                              const char* id, const char* arg);
+                                 Touched* touched, int maxTouched, int* outCount);
+    // Post-Add witness: re-read every touched element from the live definition.
+    void VerifyStoredAfterAdd(Touched* touched, int count);
     // Must be called after config lookup succeeds; enables the write path.
     void Arm(double k);
     void Arm(double k, const bool* mods);

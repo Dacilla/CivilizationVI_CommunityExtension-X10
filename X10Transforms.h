@@ -8,8 +8,11 @@
 namespace X10Transforms {
     enum Kind { ADDITIVE = 0, COMBAT = 1, PROBABILITY = 2, DISCOUNT = 3 };
 
-    inline bool FiniteRange(double v) {
-        return v == v && v >= 0 && v <= 1000000;
+    // Signed finite sanity bound (negative penalties/discounts are valid).
+    // Family-specific validity (probability/discount ranges, combat domain,
+    // count integrality) is enforced per branch below.
+    inline bool FiniteSane(double v) {
+        return v == v && std::abs(v) <= 1000000.0;
     }
 
     // Returns false when the transform is undefined for the input.
@@ -53,7 +56,7 @@ namespace X10Transforms {
         default:
             return false;
         }
-        if (!FiniteRange(v)) return false;
+        if (!FiniteSane(v)) return false;
         if (countLike) {
             double r = round(v);
             if (v != r) return false; // fractional count: refused, not floored

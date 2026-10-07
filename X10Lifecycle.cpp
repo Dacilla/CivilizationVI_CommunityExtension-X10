@@ -1,10 +1,13 @@
-// X10 lifecycle instrumentation (logging only, see X10Lifecycle.h).
+// X10 lifecycle instrumentation + production definition overrides (see
+// X10Lifecycle.h). Build/ABI constants live ONLY in the active
+// GameCoreCompatibilityProfile (X10Compat.h); this TU holds no literal
+// target RVAs, timestamps, or image sizes.
 //
 // FAIL-CLOSED VALIDATION (see docs/NATIVE_HOOK_VALIDATION.md in civ6-x10):
 // the fork installs ZERO hooks unless all of these hold:
 //   1. loaded module filename is GameCore_XP2_FinalRelease.dll,
-//   2. PE timestamp == 0x667c6f5b and SizeOfImage == 0xc60000,
-//   3. every target RVA lies in executable .text,
+//   2. PE timestamp + SizeOfImage match a known compatibility profile,
+//   3. every profile target RVA lies in executable .text,
 //   4. every target starts with a masked function-prologue class
 //      (48 89 ?? 24 ??  |  40 5?  |  48 83 EC ??).
 // The prologue classes are generic x64 code-shape checks, NOT copies of
@@ -13,17 +16,23 @@
 // adjacency, signatures) documented per hook in NATIVE_HOOK_VALIDATION.md.
 //
 // Detour prototypes match the reference signatures under the MSVC x64 ABI
-// (first 4 args in RCX/RDX/R8/R9, rest on stack; references are pointers;
-// ModifierDefinitionReference is passed as two 8-byte slots, consistent
-// with the shared_ptr reference pattern used across this TU — see doc).
+// (first 4 args in RCX/RDX/R8/R9, rest on stack; references are pointers).
+// ModifierDefinitionReference arrives as a single pointer (in RDX) to a
+// 16-byte shared_ptr-like {_Ptr, _Rep} object (resolved 2026-10-07: the
+// callee dereferences [RDX+0] then virtual +0x10 with shared_ptr control
+// block ref-counting — see doc); the hook forwards both reference slots to
+// orig_Add for call fidelity and resolves the raw definition via *(void**)d0
+// (X10Write::ResolveDefinitionReference, fail-closed).
 // All hooked functions return void.
 //
-//   PopulateModifierDefinitions 0x96f6c0 : void(pDB, modifierSystem&)
-//   AddModifierDefinition 0x943110 : void(this, definition[2 slots])
-//   DynamicModifier ctor 0x92a4f0/0x92b220 : void(this, gameFx&, owner&,
+//   PopulateModifierDefinitions : void(pDB, modifierSystem&)
+//   AddModifierDefinition : void(this, ModifierDefinitionReference)
+//   DynamicModifier ctors A/B : void(this, gameFx&, owner&,
 //       definition&, collection&, effect&)
+// (Hook RVAs: see the active profile in X10Compat.h.)
 #include "X10Lifecycle.h"
 #include "X10Write.h"
+#include "X10Compat.h"
 #include "HavokScript.h"
 #include "MinHook.h"
 #include <windows.h>
@@ -168,6 +177,10 @@ namespace X10Lifecycle {
             bool haveK = X10Config::TryGetConfigDouble("X10_MULTIPLIER", k);
             if (!haveK)
                 haveK = X10Config::TryGetProbeK(k);
+            if (haveK && k == 0) {
+                Log("X10 multiplier 0: controller OFF (definitions untouched)");
+                haveK = false;
+            }
             if (haveK) {
                 bool mods[3] = {
                     X10Config::ModuleEnabled("traits", true),
@@ -176,7 +189,15 @@ namespace X10Lifecycle {
                 };
                 for (const char* m : {"pantheons", "governors", "wonders", "suzerain"}) {
                     // Declared but unsupported: never silently applied.
-                    (void)X10Config::ModuleEnabled(m, false);
+                    char full[96] = {};
+                    snprintf(full, sizeof(full), "X10_MODULE_%s", m);
+                    for (char* p = full; *p; p++) {
+                        if (*p >= 'a' && *p <= 'z') *p -= 32;
+                    }
+                    double dummy = 0;
+                    if (X10Config::TryGetConfigDouble(full, dummy) && dummy != 0) {
+                        Log("X10_MODULE_%s requested ON but unsupported in this build; ignored", m);
+                    }
                 }
                 X10Write::Arm(k, mods);
             } else {
@@ -198,15 +219,12 @@ namespace X10Lifecycle {
             // Write BEFORE orig_Add: the definition is fully constructed by
             // the caller and not yet visible to the system, so ownership is
             // clean and no shared-reference aliasing is relied upon.
-            void* el = nullptr;
-            char expected[32] = {};
-            const char* wid = "";
-            const char* warg = "";
-            X10Write::OnAddModifierDefinition(d0, d1, &el, expected,
-                                              sizeof(expected), &wid, &warg);
+            X10Write::Touched touched[8];
+            int ntouched = 0;
+            X10Write::OnAddModifierDefinition(d0, d1, touched, 8, &ntouched);
             orig_Add(self, d0, d1);
-            if (el)
-                X10Write::VerifyStoredAfterAdd(el, expected, wid, warg);
+            if (ntouched > 0)
+                X10Write::VerifyStoredAfterAdd(touched, ntouched);
         }
 
         void __thiscall Hook_InstanceA(void* self, void* gameFx, void* owner,
@@ -233,42 +251,58 @@ namespace X10Lifecycle {
         };
     }
 
+    // The active compatibility profile, selected at Install time. All
+    // build-specific constants flow from here; implementation code holds no
+    // literal target RVAs, timestamps, or sizes.
+    static const GameCoreCompatibilityProfile* s_profile = nullptr;
+
+    const GameCoreCompatibilityProfile* ActiveProfile() { return s_profile; }
+
     bool Install(uintptr_t gameCoreBase) {
         s_base = gameCoreBase;
         X10Write::InitBase(gameCoreBase);
         Log("===== X10 native session =====");
         Log("X10 CE native write test " X10_VERSION);
-        Log("assumed GameCore build: 15038592 (reference `cur` column)");
 
         PeInfo pi = ReadPe(gameCoreBase);
         const char* base = BaseName(pi.filename);
         Log("GameCore:");
         Log("  module = %s", base);
-        Log("  image size = 0x%x (expected 0xc60000)", pi.imageSize);
-        Log("  timestamp = 0x%x (expected 0x667c6f5b)", pi.timestamp);
+        Log("  image size = 0x%x", pi.imageSize);
+        Log("  timestamp = 0x%x", pi.timestamp);
         Log("  .text = [0x%p, 0x%p)",
             reinterpret_cast<void*>(pi.textStart),
             reinterpret_cast<void*>(pi.textEnd));
-        if (!pi.ok || !SameCi(base, "GameCore_XP2_FinalRelease.dll") ||
-            pi.timestamp != 0x667c6f5b || pi.imageSize != 0xc60000) {
-            Log("HOOK VALIDATION FAILED (module identity)");
+        s_profile = nullptr;
+        if (pi.ok && SameCi(base, "GameCore_XP2_FinalRelease.dll")) {
+            for (int i = 0; i < kGameCoreProfileCount; i++) {
+                const auto& p = kGameCoreProfiles[i];
+                if (pi.timestamp == p.peTimestamp && pi.imageSize == p.imageSize) {
+                    s_profile = &p;
+                    break;
+                }
+            }
+        }
+        if (!s_profile) {
+            Log("HOOK VALIDATION FAILED (no known compatibility profile)");
             Log("NO X10 LIFECYCLE HOOKS INSTALLED");
             return false;
         }
+        Log("compatibility profile: %s", s_profile->name);
         s_textStart = pi.textStart;
         s_textEnd = pi.textEnd;
 
         Target targets[] = {
-            {"PopulateModifierDefinitions", 0x96f6c0,
+            {"PopulateModifierDefinitions", s_profile->populateRva,
              reinterpret_cast<void*>(&Hook_Populate),
              reinterpret_cast<void**>(&orig_Populate)},
-            {"AddModifierDefinition", 0x943110,
+            {"AddModifierDefinition", s_profile->addRva,
              reinterpret_cast<void*>(&Hook_Add),
              reinterpret_cast<void**>(&orig_Add)},
-            {"DynamicModifier_ctor_A", 0x92a4f0,
+            {"DynamicModifier_ctor_A", s_profile->instanceCtorA,
              reinterpret_cast<void*>(&Hook_InstanceA),
              reinterpret_cast<void**>(&orig_InstanceA)},
-            {"DynamicModifier_ctor_B", 0x92b220,
+            {"DynamicModifier_ctor_B", s_profile->instanceCtorB,
              reinterpret_cast<void*>(&Hook_InstanceB),
              reinterpret_cast<void**>(&orig_InstanceB)},
         };
@@ -287,13 +321,31 @@ namespace X10Lifecycle {
             }
         }
         Log("ALL_REQUIRED_SIGNATURES_VALID");
+        // Transactional X10-only installation: track exactly the hooks WE
+        // created/enabled, and unwind only those on failure. Unrelated
+        // Community Extension hooks are never disabled or removed here.
+        void* created[4] = {};
+        int ncreated = 0;
         for (auto& t : targets) {
             void* target = reinterpret_cast<void*>(gameCoreBase + t.rva);
-            if (MH_CreateHook(target, t.detour, reinterpret_cast<LPVOID*>(t.orig)) != MH_OK ||
-                MH_EnableHook(target) != MH_OK) {
-                Log("HOOK INSTALL FAILED (%s)", t.name);
+            if (MH_CreateHook(target, t.detour, reinterpret_cast<LPVOID*>(t.orig)) != MH_OK) {
+                Log("HOOK CREATE FAILED (%s)", t.name);
+                for (int i = 0; i < ncreated; i++)
+                    MH_RemoveHook(created[i]);
                 Log("NO X10 LIFECYCLE HOOKS INSTALLED");
-                MH_DisableHook(MH_ALL_HOOKS);
+                return false;
+            }
+            created[ncreated++] = target;
+        }
+        for (auto& t : targets) {
+            void* target = reinterpret_cast<void*>(gameCoreBase + t.rva);
+            if (MH_EnableHook(target) != MH_OK) {
+                Log("HOOK ENABLE FAILED (%s)", t.name);
+                for (int i = 0; i < ncreated; i++) {
+                    MH_DisableHook(created[i]);
+                    MH_RemoveHook(created[i]);
+                }
+                Log("NO X10 LIFECYCLE HOOKS INSTALLED");
                 return false;
             }
         }

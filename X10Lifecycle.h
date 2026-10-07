@@ -10,6 +10,7 @@
 #pragma once
 #include <cstdint>
 #include "HavokScript.h"
+#include "X10Compat.h"
 
 namespace X10Lifecycle {
     // Install validated hooks. Fail-closed: unless the loaded GameCore
@@ -25,4 +26,6 @@ namespace X10Lifecycle {
     int LuaLogMsg(struct hks::lua_State* L);
     // Shared monotonic log (%TEMP%\X10Lifecycle.log), usable from X10Write.
     void X10Log(const char* fmt, ...);
+    // Active compatibility profile selected at Install (null if none).
+    const GameCoreCompatibilityProfile* ActiveProfile();
 }

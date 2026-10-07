@@ -1,28 +1,24 @@
 // X10 native config reader + definition override writer (see X10Write.h).
 //
-// Reference basis (civ6-gamecore-reference, `cur` column, build 15038592):
-//   Configuration::Game::GetInstance ............ 0x164c20 (global read)
-//   string hash ................................. 0x606270 (rcx=str -> eax)
-//   Variant lookup: virtual method at vtable+0x68(manager, keyHash), exactly
-//     as GetGameSpeedType/GetGameMode/GetStartEra call it. The qwords at
-//     inst+0x88 (game variants) / inst+0x80 (root variants) are MANAGER
-//     OBJECTS (their first qword is a vtable), NOT raw maps: calling
-//     TypedVariantMap::FindVariant on them walks the wrong object.
-// Instance: gameMgr=[inst+0x88], rootMgr=[inst+0x80] (Windows-validated via
-// the getters above). Variant: u16 type@+0x0, payload@+0x8;
-// int pattern validated against the GetGameSpeedType mask (ids<=0x15 in
-// 0x30002e). String payloads are read as objects ONLY after strict layout
-// validation (printable, NUL-terminated <=64, strtod-clean, finite, in
-// range); anything else fails closed with type/flags/payload logged.
-//
-// ArgumentDefinition (cross-checked: 2 ctors, 2 find loops, TryGetValue):
-//   sizeof = 0xA0; name = SSO string @+0x00; value = SSO string @+0x20.
-//   SSO string: inline bytes @+0x0 (cap@+0x18 < 0x10), size@+0x10,
-//   capacity@+0x18; heap ptr @+0x0 otherwise (never touched: we only rewrite
-//   SSO-inline values whose replacement fits, else skip + log).
-// SimpleModifierDefinition: id string @+0x18 (SSO shape), argument vector
-//   @+0x40 ({begin,end,cap}); elements strided 0xA0. Every shape is
-//   re-validated per element before any byte is written.
+// All build/ABI-specific numbers live in the active GameCoreCompatibilityProfile
+// (X10Compat.h); this TU holds no literal target RVAs, timestamps, sizes, or
+// layout offsets. Reference basis is documented per field in X10Compat.h and in
+// civ6-x10 docs/NATIVE_HOOK_VALIDATION.md.
+//   Config reader: global GetInstance + string hash from the profile; variant
+//     lookup is the virtual manager method at the profile's vtable slot,
+//     exactly as GetGameSpeedType/GetGameMode/GetStartEra call it. The game /
+//     root manager members are MANAGER OBJECTS (first qword is a vtable), NOT
+//     raw maps: calling TypedVariantMap::FindVariant on them walks the wrong
+//     object (regression-covered).
+//   Variant decoding: typed switch over scalar representations (INT32 mask
+//     branch, FLOAT32 branch checked first since the engine mask also contains
+//     the float id while the engine's own callers only pass int-typed keys;
+//     fractional Lua numbers commit as float32). Unknown types fail closed,
+//     never reaching a string reader.
+//   Definition writer: id string + argument vector from the profile;
+//     ArgumentDefinition elements strided per profile with SSO name/value;
+//     only SSO-inline values whose replacement fits are rewritten, else skip
+//     + log. Every shape is re-validated per element before any write.
 #include "X10Write.h"
 #include "X10Transforms.h"
 #include "X10/X10ProductionRegistry.inc"
@@ -45,15 +41,18 @@ namespace {
     typedef void* (__cdecl* GetInstanceFn)();
     typedef uint32_t(__cdecl* HashFn)(const char* s);
     // Virtual variant lookup, replicating GetGameSpeedType exactly:
-    // manager = *(inst+off); variant = manager->vtable[0x68/8](manager, key).
+    // manager = *(inst+off); variant = manager->vtable[slot](manager, key),
+    // with instance offsets + vtable slot from the active profile.
     typedef void* (__cdecl* LookupFn)(void* manager, uint32_t key);
 
     static void* LookupVariant(void* manager, uint32_t key) {
+        auto* prof = X10Lifecycle::ActiveProfile();
+        if (!prof) return nullptr;
         __try {
             if (!manager) return nullptr;
             void* vt = *reinterpret_cast<void**>(manager);
             if (!vt) return nullptr;
-            void* fn = reinterpret_cast<void**>(vt)[0x68 / 8];
+            void* fn = reinterpret_cast<void**>(vt)[prof->lookupVtableOff / 8];
             if (!fn) return nullptr;
             return reinterpret_cast<LookupFn>(fn)(manager, key);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -85,15 +84,17 @@ namespace {
         typeOut = 0xFFFF;
         flagsOut = 0;
         *kindOut = "unknown";
+        auto* prof = X10Lifecycle::ActiveProfile();
+        if (!prof) return false;
         __try {
             uint8_t* v = reinterpret_cast<uint8_t*>(variant);
-            uint16_t type = *reinterpret_cast<uint16_t*>(v);
-            uint32_t flags = *reinterpret_cast<uint32_t*>(v + 0x14);
+            uint16_t type = *reinterpret_cast<uint16_t*>(v + prof->variantTypeOff);
+            uint32_t flags = *reinterpret_cast<uint32_t*>(v + prof->variantFlagsOff);
             typeOut = type;
             flagsOut = flags;
-            if (type == 4) {
+            if (type == prof->floatId) {
                 float f = 0;
-                memcpy(&f, v + 8, sizeof(f));
+                memcpy(&f, v + prof->variantPayloadOff, sizeof(f));
                 if (f == f && f >= 0 && f <= 100) {
                     out = (double)f;
                     *kindOut = "FLOAT32";
@@ -101,8 +102,15 @@ namespace {
                 }
                 return false; // non-finite/out-of-range float: fail closed
             }
-            if (!((flags >> 0x1d) & 1) && type <= 0x15 && ((0x30002e >> type) & 1)) {
-                out = (double)*reinterpret_cast<int32_t*>(v + 8);
+            bool inMask = false;
+            for (int i = 0; i < 8 && prof->intMaskIds[i] != 0xFFFF; i++) {
+                if (prof->intMaskIds[i] == type) {
+                    inMask = true;
+                    break;
+                }
+            }
+            if (!((flags >> 0x1d) & 1) && inMask) {
+                out = (double)*reinterpret_cast<int32_t*>(v + prof->variantPayloadOff);
                 *kindOut = "INT32";
                 return true; // INT32
             }
@@ -114,44 +122,14 @@ namespace {
 }
 
 namespace X10Config {
+    static void* FindConfigVariant(const char* key);
     bool TryGetConfigDouble(const char* key, double& out) {
         out = 0;
-        auto getInstance = At<GetInstanceFn>(0x164c20);
-        auto hashFn = At<HashFn>(0x606270);
-        void* inst = nullptr;
-        __try {
-            inst = getInstance();
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            X10Lifecycle::X10Log("CONFIG key=%s found=false reason=getinstance-fault", key);
+        void* variant = FindConfigVariant(key);
+        if (!variant) {
+            X10Lifecycle::X10Log("CONFIG key=%s found=false reason=absent-or-unreachable", key);
             return false;
         }
-        if (!inst) {
-            X10Lifecycle::X10Log("CONFIG key=%s found=false reason=null-instance", key);
-            return false;
-        }
-        uint32_t h = 0;
-        __try {
-            h = hashFn(key);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            X10Lifecycle::X10Log("CONFIG key=%s found=false reason=hash-fault", key);
-            return false;
-        }
-        const uintptr_t mgrs[2] = {0x88, 0x80}; // game variants first, then root
-        for (int m = 0; m < 2; m++) {
-            void* mgr = nullptr;
-            __try {
-                mgr = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(inst) + mgrs[m]);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                continue;
-            }
-            if (!mgr) continue;
-            void* variant = nullptr;
-            __try {
-                variant = LookupVariant(mgr, h);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                continue;
-            }
-            if (!variant) continue;
             double d = 0;
             unsigned vtype = 0xFFFF;
             uint32_t vflags = 0;
@@ -175,16 +153,16 @@ namespace X10Config {
             } __except (EXCEPTION_EXECUTE_HANDLER) {
             }
             return false;
-        }
-        X10Lifecycle::X10Log("CONFIG key=%s found=false reason=absent-from-both-managers", key);
-        return false;
     }
 
     // Raw variant lookup shared by value reads and presence probes.
     // Returns the variant pointer, or null when absent/unreachable.
+    // All addresses come from the active compatibility profile.
     static void* FindConfigVariant(const char* key) {
-        auto getInstance = At<GetInstanceFn>(0x164c20);
-        auto hashFn = At<HashFn>(0x606270);
+        auto* prof = X10Lifecycle::ActiveProfile();
+        if (!prof) return nullptr;
+        auto getInstance = At<GetInstanceFn>(prof->getInstanceRva);
+        auto hashFn = At<HashFn>(prof->hashRva);
         void* inst = nullptr;
         __try {
             inst = getInstance();
@@ -198,7 +176,7 @@ namespace X10Config {
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             return nullptr;
         }
-        const uintptr_t mgrs[2] = {0x88, 0x80};
+        const uintptr_t mgrs[2] = {prof->gameVariantsOff, prof->rootVariantsOff};
         for (int m = 0; m < 2; m++) {
             void* mgr = nullptr;
             __try {
@@ -260,13 +238,6 @@ namespace X10Write {
     static volatile LONG s_mismatchesPopulate = 0;
     static volatile LONG s_skippedPopulate = 0;
 
-    static int ModuleIndex(const char* module) {
-        if (strcmp(module, "traits") == 0) return 0;
-        if (strcmp(module, "policies") == 0) return 1;
-        if (strcmp(module, "governments") == 0) return 2;
-        return -1;
-    }
-
     void Arm(double k, const bool* mods) {
         g_k = k;
         g_armed = true;
@@ -301,16 +272,18 @@ namespace X10Write {
     }
 
     // Bounded READ-ONLY string reader: SSO-inline and heap-backed (reads only;
-    // heap WRITES remain refused — see SsoWrite).
+    // heap WRITES remain refused — see SsoWrite). Layout from the profile.
     static bool BoundedStringRead(void* s, char* out, size_t cap,
                                   size_t& lenOut) {
+        auto* prof = X10Lifecycle::ActiveProfile();
+        if (!prof) return false;
         __try {
             uint8_t* p = reinterpret_cast<uint8_t*>(s);
-            uint64_t size = *reinterpret_cast<uint64_t*>(p + 0x10);
-            uint64_t capa = *reinterpret_cast<uint64_t*>(p + 0x18);
+            uint64_t size = *reinterpret_cast<uint64_t*>(p + prof->ssoSizeOff);
+            uint64_t capa = *reinterpret_cast<uint64_t*>(p + prof->ssoCapOff);
             if (size > 256) return false;
             const char* data = nullptr;
-            if (capa < 0x10) {
+            if (capa < prof->ssoInlineThreshold) {
                 data = reinterpret_cast<const char*>(p);
             } else {
                 if (capa < size) return false;
@@ -332,17 +305,19 @@ namespace X10Write {
     }
 
     static bool SsoWrite(void* s, const char* text) {
+        auto* prof = X10Lifecycle::ActiveProfile();
+        if (!prof) return false;
         __try {
             size_t n = strlen(text);
-            if (n > 15) return false;
+            if (n >= prof->ssoInlineThreshold) return false;
             uint8_t* p = reinterpret_cast<uint8_t*>(s);
-            uint64_t capa = *reinterpret_cast<uint64_t*>(p + 0x18);
-            if (capa >= 0x10) return false; // heap: never touch
+            uint64_t capa = *reinterpret_cast<uint64_t*>(p + prof->ssoCapOff);
+            if (capa >= prof->ssoInlineThreshold) return false; // heap: never touch
             for (size_t i = 0; i < n; i++) {
                 if (text[i] < 32 || text[i] > 126) return false;
             }
             memcpy(p, text, n + 1);
-            *reinterpret_cast<uint64_t*>(p + 0x10) = (uint64_t)n;
+            *reinterpret_cast<uint64_t*>(p + prof->ssoSizeOff) = (uint64_t)n;
             return true;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             return false;
@@ -369,43 +344,53 @@ namespace X10Write {
         }
     }
 
-    // Writes the first matching production entry of one definition.
-    // Every entry derives from official baseline + runtime k (never from
-    // stored values). Official mismatch skips THAT entry and counts it.
-    // Returns true and fills outEl/outExpected when a write happened.
-    static bool WriteDefinition(void* definition, void** outEl,
-                                char* outExpected, size_t expCap,
-                                const char** outId, const char** outArg) {
-        *outEl = nullptr;
+    static int EnabledOwnerMask() {
+        int mask = 0;
+        if (s_modEnabled[0]) mask |= 1;
+        if (s_modEnabled[1]) mask |= 2;
+        if (s_modEnabled[2]) mask |= 4;
+        return mask;
+    }
+
+    // Writes ALL matching production entries of one definition (multi-arg
+    // capable: refusal of one argument never blocks another eligible one).
+    // Shared entries apply only when ALL owning modules are enabled.
+    // Returns the write count; fills touched[] up to maxTouched.
+    static int WriteDefinition(void* definition, Touched* touched, int maxTouched) {
+        int n = 0;
+        auto* prof = X10Lifecycle::ActiveProfile();
+        if (!prof) return 0;
         __try {
             uint8_t* def = reinterpret_cast<uint8_t*>(definition);
             static char id[256];
             size_t idLen = 0;
-            if (!SsoRead(def + 0x18, id, sizeof(id), idLen)) return false; // id unreadable: skip
-            // Argument vector at +0x40: {begin, end, cap}.
-            void** vec = reinterpret_cast<void**>(def + 0x40);
+            if (!SsoRead(def + prof->defIdOff, id, sizeof(id), idLen)) return 0; // id unreadable: skip
+            // Argument vector {begin, end, cap} at the profile offset.
+            void** vec = reinterpret_cast<void**>(def + prof->argVecOff);
             uint8_t* begin = reinterpret_cast<uint8_t*>(vec[0]);
             uint8_t* end = reinterpret_cast<uint8_t*>(vec[1]);
-            if (!begin || !end || end < begin) return false;
-            size_t count = (size_t)(end - begin) / 0xA0;
-            if (count == 0 || count > 64) return false; // insane: skip
+            if (!begin || !end || end < begin) return 0;
+            size_t count = (size_t)(end - begin) / prof->argStride;
+            if (count == 0 || count > prof->maxArgs) return 0; // insane: skip
+            int enabled = EnabledOwnerMask();
             for (int t = 0; t < kX10ProductionRegistryCount; t++) {
                 const X10RegistryEntry& e = kX10ProductionRegistry[t];
                 if (strcmp(id, e.modifierId) != 0) continue;
-                int mi = ModuleIndex(e.module);
-                if (mi < 0 || !s_modEnabled[mi]) {
+                if ((e.owners & enabled) != e.owners) {
                     InterlockedIncrement(&s_skippedPopulate);
+                    X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s owners=0x%x not-all-enabled skipped",
+                           e.modifierId, e.argument, e.owners);
                     continue;
                 }
                 for (size_t i = 0; i < count; i++) {
-                    uint8_t* el = begin + i * 0xA0;
+                    uint8_t* el = begin + i * prof->argStride;
                     char name[64] = {};
                     size_t nameLen = 0;
-                    if (!SsoRead(el, name, sizeof(name), nameLen)) continue;
+                    if (!SsoRead(el + prof->argNameOff, name, sizeof(name), nameLen)) continue;
                     if (strcmp(name, e.argument) != 0) continue;
                     char before[64] = {};
                     size_t beforeLen = 0;
-                    if (!SsoRead(el + 0x20, before, sizeof(before), beforeLen)) continue;
+                    if (!SsoRead(el + prof->argValueOff, before, sizeof(before), beforeLen)) continue;
                     if (strcmp(before, e.official) != 0) {
                         InterlockedIncrement(&s_mismatchesPopulate);
                         X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s official-mismatch(expected %s, saw %s) skipped",
@@ -415,65 +400,68 @@ namespace X10Write {
                     double official = strtod(before, nullptr);
                     char replacement[32] = {};
                     static const char* kNames[] = {"ADDITIVE", "COMBAT", "PROBABILITY", "DISCOUNT"};
+                    const char* tname = (e.kind >= 0 && e.kind <= 3) ? kNames[e.kind] : "?";
                     if (!X10Transforms::Apply(e.kind, official, g_k, e.countLike != 0,
                                               replacement, sizeof(replacement))) {
                         InterlockedIncrement(&s_skippedPopulate);
                         X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s transform-refused kind=%s skipped",
-                               e.modifierId, e.argument, kNames[e.kind]);
+                               e.modifierId, e.argument, tname);
                         continue;
                     }
-                    if (!SsoWrite(el + 0x20, replacement)) {
+                    if (!SsoWrite(el + prof->argValueOff, replacement)) {
                         InterlockedIncrement(&s_skippedPopulate);
                         X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s write-refused (not SSO-safe)", e.modifierId, e.argument);
                         continue;
                     }
                     char after[64] = {};
                     size_t afterLen = 0;
-                    SsoRead(el + 0x20, after, sizeof(after), afterLen);
+                    SsoRead(el + prof->argValueOff, after, sizeof(after), afterLen);
                     InterlockedIncrement(&s_writesSession);
                     InterlockedIncrement(&s_writesPopulate);
                     X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s official=%s k=%.6g transform=%s requested=%s before=%s after=%s phase=definition-population",
-                           e.modifierId, e.argument, e.official, g_k, kNames[e.kind], replacement, before, after);
-                    *outEl = el + 0x20;
-                    strncpy(outExpected, replacement, expCap - 1);
-                    *outId = e.modifierId;
-                    *outArg = e.argument;
-                    return true;
+                           e.modifierId, e.argument, e.official, g_k, tname, replacement, before, after);
+                    if (n < maxTouched) {
+                        touched[n].element = el + prof->argValueOff;
+                        strncpy(touched[n].expected, replacement, sizeof(touched[n].expected) - 1);
+                        touched[n].id = e.modifierId;
+                        touched[n].arg = e.argument;
+                    }
+                    n++;
                 }
-                return false; // id matched: done with this definition
             }
-            return false;
+            return n;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             X10Lifecycle::X10Log("[X10WRITE] fault during definition scan (skipped)");
-            return false;
+            return n;
         }
     }
 
     void OnAddModifierDefinition(void* d0, void* d1,
-                                 void** outEl, char* outExpected, size_t expCap,
-                                 const char** outId, const char** outArg) {
-        *outEl = nullptr;
-        if (outExpected && expCap) outExpected[0] = '\0';
+                                 Touched* touched, int maxTouched, int* outCount) {
+        *outCount = 0;
         if (!g_armed) return;
         void* definition = ResolveDefinitionReference(d0, d1);
         if (!definition) {
             X10Lifecycle::X10Log("[X10WRITE] unresolvable definition reference (skipped)");
             return;
         }
-        WriteDefinition(definition, outEl, outExpected, expCap, outId, outArg);
+        *outCount = WriteDefinition(definition, touched, maxTouched);
     }
 
-    // Post-Add witness: re-read the touched element from the live definition.
-    void VerifyStoredAfterAdd(void* el, const char* expected,
-                              const char* id, const char* arg) {
-        char stored[64] = {};
-        size_t storedLen = 0;
-        if (el && SsoRead(el, stored, sizeof(stored), storedLen)) {
-            X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=%s expected=%s %s",
-                   id, arg, stored, expected,
-                   strcmp(stored, expected) == 0 ? "MATCH" : "MISMATCH");
-        } else {
-            X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=<unreadable>", id, arg);
+    // Post-Add witness: re-read every touched element from the live definition.
+    void VerifyStoredAfterAdd(Touched* touched, int count) {
+        for (int i = 0; i < count; i++) {
+            char stored[64] = {};
+            size_t storedLen = 0;
+            if (touched[i].element &&
+                SsoRead(touched[i].element, stored, sizeof(stored), storedLen)) {
+                X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=%s expected=%s %s",
+                       touched[i].id, touched[i].arg, stored, touched[i].expected,
+                       strcmp(stored, touched[i].expected) == 0 ? "MATCH" : "MISMATCH");
+            } else {
+                X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=<unreadable>",
+                       touched[i].id, touched[i].arg);
+            }
         }
     }
 
