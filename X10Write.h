@@ -37,5 +37,7 @@ namespace X10Write {
     // Fail-closed reset at the start of EVERY PopulateModifierDefinitions:
     // clears armed state, k, and the per-population write count.
     void Disarm();
+    // Per-population successful writes (preserved for exit diagnostics).
+    long WritesThisPopulate();
     bool IsArmed();
 }

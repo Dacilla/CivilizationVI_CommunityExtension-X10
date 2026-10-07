@@ -64,17 +64,34 @@ namespace {
         }
     }
 
-    bool VariantToDouble(void* variant, double& out) {
-        // Mirrors GetGameSpeedType/GetGameMode exactly: flags@+0x14 bit 0x1d
-        // set means "not a plain int"; else u16 type must be in 0x30002e.
+    // Typed switch over the engine's scalar variant representations.
+    // INT32: proven by the GetGameSpeedType/GetGameMode mask (ids<=0x15 in
+    //   0x30002e, flags bit 0x1d clear), payload dword@+8.
+    // STRING: payload is a string OBJECT at +8 with the engine string layout
+    //   confirmed independently in ArgumentDefinition/TryGetValue RE
+    //   (size@+0x10, capacity@+0x18, SSO-inline iff capacity<0x10). Accepted
+    //   only with strict validation (printable, NUL-terminated, strtod-clean,
+    //   finite, in range). FLOAT32/FLOAT64 type ids are NOT established: no
+    //   float-domain setup parameter exists and no float construction site
+    //   was found, so there is deliberately no float branch. Anything else:
+    //   fail closed with the exact type id / flags / payload logged.
+    // The accepted type id is ALWAYS logged, so the first live run proves
+    // which representation X10_PROBE_K actually uses.
+    static bool VariantToDouble(void* variant, double& out,
+                                unsigned& typeOut, uint32_t& flagsOut) {
+        typeOut = 0xFFFF;
+        flagsOut = 0;
         __try {
             uint8_t* v = reinterpret_cast<uint8_t*>(variant);
-            uint32_t flags = *reinterpret_cast<uint32_t*>(v + 0x14);
-            if ((flags >> 0x1d) & 1) return false;
             uint16_t type = *reinterpret_cast<uint16_t*>(v);
-            if (type > 0x15 || !((0x30002e >> type) & 1)) return false;
-            out = (double)*reinterpret_cast<int32_t*>(v + 8);
-            return true;
+            uint32_t flags = *reinterpret_cast<uint32_t*>(v + 0x14);
+            typeOut = type;
+            flagsOut = flags;
+            if (!((flags >> 0x1d) & 1) && type <= 0x15 && ((0x30002e >> type) & 1)) {
+                out = (double)*reinterpret_cast<int32_t*>(v + 8);
+                return true; // INT32
+            }
+            return false;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             return false;
         }
@@ -122,17 +139,19 @@ namespace X10Config {
             }
             if (!variant) continue;
             double d = 0;
-            if (VariantToDouble(variant, d)) {
+            unsigned vtype = 0xFFFF;
+            uint32_t vflags = 0;
+            if (VariantToDouble(variant, d, vtype, vflags)) {
                 if (d >= 0 && d <= 100 && d == d) {
                     out = d;
-                    X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true type=numeric raw=%f numeric=%f", d, d);
+                    X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true type=INT32 id=%u flags=0x%x numeric=%f", vtype, vflags, d);
                     return true;
                 }
-                X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true type=numeric raw=%f reason=out-of-range", d);
+                X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true type=INT32 id=%u raw=%f reason=out-of-range", vtype, d);
                 return false;
             }
             char buf[72] = {};
-            // String-typed variant: payload is a string object at +8.
+            // STRING branch (see switch comment above): payload object at +8.
             bool ok = false;
             __try {
                 uint8_t* v = reinterpret_cast<uint8_t*>(variant);
@@ -146,10 +165,10 @@ namespace X10Config {
                 double dd = strtod(buf, &end);
                 if (end != buf && *end == '\0' && dd == dd && dd >= 0 && dd <= 100) {
                     out = dd;
-                    X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true type=string raw=%s numeric=%f", buf, dd);
+                    X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true type=STRING id=%u flags=0x%x raw=%s numeric=%f", vtype, vflags, buf, dd);
                     return true;
                 }
-                X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true type=string raw=%s reason=unparseable", buf);
+                X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true reason=unparseable-string id=%u raw=%s", vtype, buf);
                 return false;
             }
             X10Lifecycle::X10Log("CONFIG key=X10_PROBE_K found=true reason=unreadable-variant-type");
@@ -198,6 +217,8 @@ namespace X10Write {
     }
 
     bool IsArmed() { return g_armed; }
+
+    long WritesThisPopulate() { return (long)s_writesPopulate; }
 
     static bool BoundedStringRead(void* s, char* out, size_t cap,
                                   size_t& lenOut);
@@ -321,6 +342,7 @@ namespace X10Write {
                             continue;
                         }
                         snprintf(replacement, sizeof(replacement), "%.2f", v);
+                        // Proof expectation locked: b=5,k=7.3 -> 24.04.
                     } else {
                         double v = official * g_k;
                         if (!(v == v)) {

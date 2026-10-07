@@ -168,8 +168,10 @@ namespace X10Lifecycle {
                 Log("X10 writes DISABLED for this session (no native k)");
             }
             orig_Populate(pDB, modifierSystem);
-            Log("PopulateModifierDefinitions EXIT depth=%ld definitions_added=%ld",
-                s_populateDepth, s_addCount);
+            Log("PopulateModifierDefinitions EXIT depth=%ld definitions_added=%ld writes_this_population=%ld",
+                s_populateDepth, s_addCount, X10Write::WritesThisPopulate());
+            // Never remain armed outside the population window.
+            X10Write::Disarm();
             InterlockedDecrement(&s_populateDepth);
         }
 
