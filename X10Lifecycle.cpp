@@ -164,14 +164,28 @@ namespace X10Lifecycle {
             // leaves writes=0 even if an earlier game in this process armed.
             X10Write::Disarm();
             double k = 0;
-            if (X10Config::TryGetProbeK(k)) {
-                X10Write::Arm(k);
+            // Production multiplier (probe key still honored for experiments).
+            bool haveK = X10Config::TryGetConfigDouble("X10_MULTIPLIER", k);
+            if (!haveK)
+                haveK = X10Config::TryGetProbeK(k);
+            if (haveK) {
+                bool mods[3] = {
+                    X10Config::ModuleEnabled("traits", true),
+                    X10Config::ModuleEnabled("policies", true),
+                    X10Config::ModuleEnabled("governments", true),
+                };
+                for (const char* m : {"pantheons", "governors", "wonders", "suzerain"}) {
+                    // Declared but unsupported: never silently applied.
+                    (void)X10Config::ModuleEnabled(m, false);
+                }
+                X10Write::Arm(k, mods);
             } else {
                 Log("X10 writes DISABLED for this session (no native k)");
             }
             orig_Populate(pDB, modifierSystem);
-            Log("PopulateModifierDefinitions EXIT depth=%ld definitions_added=%ld writes_this_population=%ld",
-                s_populateDepth, s_addCount, X10Write::WritesThisPopulate());
+            Log("PopulateModifierDefinitions EXIT depth=%ld definitions_added=%ld writes=%ld mismatches=%ld skipped=%ld",
+                s_populateDepth, s_addCount, X10Write::WritesThisPopulate(),
+                X10Write::MismatchesThisPopulate(), X10Write::SkippedThisPopulate());
             // Never remain armed outside the population window.
             X10Write::Disarm();
             InterlockedDecrement(&s_populateDepth);
