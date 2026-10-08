@@ -183,12 +183,13 @@ namespace X10Lifecycle {
                 haveK = false;
             }
             if (haveK) {
-                bool mods[3] = {
+                bool mods[4] = {
                     X10Config::ModuleEnabled("traits", true),
                     X10Config::ModuleEnabled("policies", true),
                     X10Config::ModuleEnabled("governments", true),
+                    X10Config::ModuleEnabled("pantheons", true),
                 };
-                for (const char* m : {"pantheons", "governors", "wonders", "suzerain"}) {
+                for (const char* m : {"governors", "wonders", "suzerain"}) {
                     // Declared but unsupported: never silently applied.
                     char full[96] = {};
                     snprintf(full, sizeof(full), "X10_MODULE_%s", m);
