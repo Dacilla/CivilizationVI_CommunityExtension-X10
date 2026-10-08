@@ -266,6 +266,14 @@ namespace X10Write {
     static volatile LONG s_writesPopulate = 0;
     static volatile LONG s_mismatchesPopulate = 0;
     static volatile LONG s_skippedPopulate = 0;
+    static volatile LONG s_transformRefused = 0;
+    static volatile LONG s_postAddMatch = 0;
+    static volatile LONG s_postAddMismatch = 0;
+    static volatile LONG s_postAddUnreadable = 0;
+    // Store-lookup path proven at Install (getDefRva validated). When false,
+    // Verify degrades loudly: every touched entry counts unreadable, never
+    // MATCH. The writer path is unaffected.
+    static bool s_storeLookupProven = false;
 
     void Arm(double k, const bool* mods, double kErr) {
         g_k = k;
@@ -292,13 +300,23 @@ namespace X10Write {
         s_writesPopulate = 0;
         s_mismatchesPopulate = 0;
         s_skippedPopulate = 0;
+        s_transformRefused = 0;
+        s_postAddMatch = 0;
+        s_postAddMismatch = 0;
+        s_postAddUnreadable = 0;
     }
 
     bool IsArmed() { return g_armed; }
 
+    void SetStoreLookupProven(bool proven) { s_storeLookupProven = proven; }
+
     long WritesThisPopulate() { return (long)s_writesPopulate; }
     long MismatchesThisPopulate() { return (long)s_mismatchesPopulate; }
     long SkippedThisPopulate() { return (long)s_skippedPopulate; }
+    long TransformRefusedThisPopulate() { return (long)s_transformRefused; }
+    long PostAddMatchThisPopulate() { return (long)s_postAddMatch; }
+    long PostAddMismatchThisPopulate() { return (long)s_postAddMismatch; }
+    long PostAddUnreadableThisPopulate() { return (long)s_postAddUnreadable; }
 
     static bool BoundedStringRead(void* s, char* out, size_t cap,
                                   size_t& lenOut);
@@ -440,7 +458,7 @@ namespace X10Write {
                     if (!X10Transforms::Apply(e.kind, official, g_k, g_kErr,
                                               e.countLike != 0,
                                               replacement, sizeof(replacement))) {
-                        InterlockedIncrement(&s_skippedPopulate);
+                        InterlockedIncrement(&s_transformRefused);
                         X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s transform-refused kind=%s skipped",
                                e.modifierId, e.argument, tname);
                         continue;
@@ -458,10 +476,12 @@ namespace X10Write {
                     X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s official=%s k=%.6g transform=%s requested=%s before=%s after=%s phase=definition-population",
                            e.modifierId, e.argument, e.official, g_k, tname, replacement, before, after);
                     if (n < maxTouched) {
-                        touched[n].element = el + prof->argValueOff;
+                        strncpy(touched[n].id, id, sizeof(touched[n].id) - 1);
+                        touched[n].id[sizeof(touched[n].id) - 1] = '\0';
+                        strncpy(touched[n].arg, e.argument, sizeof(touched[n].arg) - 1);
+                        touched[n].arg[sizeof(touched[n].arg) - 1] = '\0';
                         strncpy(touched[n].expected, replacement, sizeof(touched[n].expected) - 1);
-                        touched[n].id = e.modifierId;
-                        touched[n].arg = e.argument;
+                        touched[n].expected[sizeof(touched[n].expected) - 1] = '\0';
                     }
                     n++;
                 }
@@ -485,20 +505,142 @@ namespace X10Write {
         *outCount = WriteDefinition(definition, touched, maxTouched);
     }
 
-    // Post-Add witness: re-read every touched element from the live definition.
-    void VerifyStoredAfterAdd(Touched* touched, int count) {
-        for (int i = 0; i < count; i++) {
-            char stored[64] = {};
-            size_t storedLen = 0;
-            if (touched[i].element &&
-                SsoRead(touched[i].element, stored, sizeof(stored), storedLen)) {
-                X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=%s expected=%s %s",
-                       touched[i].id, touched[i].arg, stored, touched[i].expected,
-                       strcmp(stored, touched[i].expected) == 0 ? "MATCH" : "MISMATCH");
-            } else {
-                X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=<unreadable>",
-                       touched[i].id, touched[i].arg);
+    // Post-Add witness: resolve every touched entry through the REGISTERED
+    // ModifierSystem store (engine GetModifierDefinition by ID string) and
+    // compare against the expected value. Tiers:
+    //   textual definition retained -> MATCH / MISMATCH;
+    //   definition found + ID cross-checked but value blank/absent ->
+    //     typed-or-consumed (unreadable, never MATCH);
+    //   lookup miss / fault / degraded path -> unreadable, never MATCH.
+    // The engine key is the ID string itself (MSVC std::string layout,
+    // heap form over caller-owned storage; proven by Get's find helper,
+    // which reads key bytes + size from the string object).
+    struct EngineKey {
+        const char* ptr; // +0x0 (heap form)
+        char pad[8];     // +0x8 (unused)
+        uint64_t size;   // +0x10
+        uint64_t capa;   // +0x18 (must be >= ssoInlineThreshold)
+    };
+    struct EngineRef {
+        void* ptr; // shared_ptr _Ptr: the definition object
+        void* rep; // shared_ptr _Rep: control block (we AddRef'd; release)
+    };
+    typedef void (__thiscall* GetDefFn)(void* self, void* outRef, void* idKey);
+
+    // Release our Get-acquired reference (mirrors Add's tail: decref uses;
+    // the store always holds its own ref, so destroy is unreachable — if it
+    // ever were last, log + leak rather than run destroy paths).
+    static void ReleaseEngineRef(void* rep) {
+        if (!rep) return;
+        __try {
+            LONG* uses = reinterpret_cast<LONG*>(reinterpret_cast<uint8_t*>(rep) + 8);
+            LONG remaining = InterlockedDecrement(uses);
+            if (remaining == 0) {
+                X10Lifecycle::X10Log("[X10WRITE] ref-release was last (leaked, not destroyed)");
             }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            X10Lifecycle::X10Log("[X10WRITE] ref-release fault (leaked)");
+        }
+    }
+
+    static void VerifyOne(void* system, Touched* t) {
+        auto* prof = X10Lifecycle::ActiveProfile();
+        if (!prof || !s_storeLookupProven || !system) {
+            InterlockedIncrement(&s_postAddUnreadable);
+            X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=<lookup-unavailable> expected=%s",
+                   t->id, t->arg, t->expected);
+            return;
+        }
+        __try {
+            size_t len = strlen(t->id);
+            if (len == 0 || len > 63) {
+                InterlockedIncrement(&s_postAddUnreadable);
+                X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=<bad-id> expected=%s",
+                       t->id, t->arg, t->expected);
+                return;
+            }
+            EngineKey key;
+            key.ptr = t->id;
+            memset(key.pad, 0, sizeof(key.pad));
+            key.size = (uint64_t)len;
+            key.capa = 64; // heap form over our stable Touched storage
+            EngineRef out{ nullptr, nullptr };
+            auto getFn = reinterpret_cast<GetDefFn>(
+                reinterpret_cast<uint8_t*>(g_base) + prof->getDefRva);
+            getFn(system, &out, &key);
+            if (!out.ptr || !out.rep) {
+                InterlockedIncrement(&s_postAddUnreadable);
+                X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=<lookup-miss> expected=%s",
+                       t->id, t->arg, t->expected);
+                return;
+            }
+            // ID cross-check: proves the lookup returned OUR definition.
+            // A wrong definition here refutes the key derivation, loudly.
+            uint8_t* def = reinterpret_cast<uint8_t*>(out.ptr);
+            bool idOk = false;
+            char storedId[256] = {};
+            size_t idLen = 0;
+            if (*reinterpret_cast<void**>(def) &&
+                SsoRead(def + prof->defIdOff, storedId, sizeof(storedId), idLen) &&
+                strcmp(storedId, t->id) == 0) {
+                idOk = true;
+            }
+            if (!idOk) {
+                InterlockedIncrement(&s_postAddMismatch);
+                X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_id_mismatch(saw %s) expected-id=%s MISMATCH",
+                       t->id, t->arg, storedId[0] ? storedId : "<unreadable>", t->id);
+                ReleaseEngineRef(out.rep);
+                return;
+            }
+            // Walk the REGISTERED definition's argument vector for our arg.
+            void** vec = reinterpret_cast<void**>(def + prof->argVecOff);
+            uint8_t* begin = reinterpret_cast<uint8_t*>(vec[0]);
+            uint8_t* end = reinterpret_cast<uint8_t*>(vec[1]);
+            if (begin && end && end >= begin) {
+                size_t count = (size_t)(end - begin) / prof->argStride;
+                if (count > 0 && count <= prof->maxArgs) {
+                    for (size_t i = 0; i < count; i++) {
+                        uint8_t* el = begin + i * prof->argStride;
+                        char name[64] = {};
+                        size_t nameLen = 0;
+                        if (!SsoRead(el + prof->argNameOff, name, sizeof(name), nameLen))
+                            continue;
+                        if (strcmp(name, t->arg) != 0)
+                            continue;
+                        char stored[64] = {};
+                        size_t storedLen = 0;
+                        if (!SsoRead(el + prof->argValueOff, stored, sizeof(stored), storedLen)) {
+                            InterlockedIncrement(&s_postAddUnreadable);
+                            X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=<typed-or-consumed> expected=%s",
+                                   t->id, t->arg, t->expected);
+                        } else if (strcmp(stored, t->expected) == 0) {
+                            InterlockedIncrement(&s_postAddMatch);
+                            X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=%s expected=%s MATCH via=store-lookup",
+                                   t->id, t->arg, stored, t->expected);
+                        } else {
+                            InterlockedIncrement(&s_postAddMismatch);
+                            X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=%s expected=%s MISMATCH via=store-lookup",
+                                   t->id, t->arg, stored[0] ? stored : "<empty>", t->expected);
+                        }
+                        ReleaseEngineRef(out.rep);
+                        return;
+                    }
+                }
+            }
+            InterlockedIncrement(&s_postAddUnreadable);
+            X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=<arg-absent> expected=%s",
+                   t->id, t->arg, t->expected);
+            ReleaseEngineRef(out.rep);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            InterlockedIncrement(&s_postAddUnreadable);
+            X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=<verify-fault> expected=%s",
+                   t->id, t->arg, t->expected);
+        }
+    }
+
+    void VerifyStoredAfterAdd(void* system, Touched* touched, int count) {
+        for (int i = 0; i < count; i++) {
+            VerifyOne(system, &touched[i]);
         }
     }
 

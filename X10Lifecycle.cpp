@@ -205,9 +205,14 @@ namespace X10Lifecycle {
                 Log("X10 writes DISABLED for this session (no native k)");
             }
             orig_Populate(pDB, modifierSystem);
-            Log("PopulateModifierDefinitions EXIT depth=%ld definitions_added=%ld writes=%ld mismatches=%ld skipped=%ld",
+            Log("PopulateModifierDefinitions EXIT depth=%ld definitions_added=%ld writes=%ld transform_refused=%ld official_mismatch=%ld post_add_match=%ld post_add_mismatch=%ld post_add_unreadable=%ld skipped_other=%ld",
                 s_populateDepth, s_addCount, X10Write::WritesThisPopulate(),
-                X10Write::MismatchesThisPopulate(), X10Write::SkippedThisPopulate());
+                X10Write::TransformRefusedThisPopulate(),
+                X10Write::MismatchesThisPopulate(),
+                X10Write::PostAddMatchThisPopulate(),
+                X10Write::PostAddMismatchThisPopulate(),
+                X10Write::PostAddUnreadableThisPopulate(),
+                X10Write::SkippedThisPopulate());
             // Never remain armed outside the population window.
             X10Write::Disarm();
             InterlockedDecrement(&s_populateDepth);
@@ -224,8 +229,11 @@ namespace X10Lifecycle {
             int ntouched = 0;
             X10Write::OnAddModifierDefinition(d0, d1, touched, 8, &ntouched);
             orig_Add(self, d0, d1);
+            // Verify AFTER orig_Add against the REGISTERED store (engine
+            // GetModifierDefinition by ID): logical identity only, never a
+            // retained pre-Add pointer.
             if (ntouched > 0)
-                X10Write::VerifyStoredAfterAdd(touched, ntouched);
+                X10Write::VerifyStoredAfterAdd(self, touched, ntouched);
         }
 
         void __thiscall Hook_InstanceA(void* self, void* gameFx, void* owner,
@@ -322,6 +330,21 @@ namespace X10Lifecycle {
             }
         }
         Log("ALL_REQUIRED_SIGNATURES_VALID");
+        // Post-Add witness lookup target (call-only, never hooked):
+        // ModifierSystem::GetModifierDefinition. Same in-.text + prologue
+        // validation; on failure the witness degrades loudly (all touched
+        // entries count unreadable) while the proven writer path is kept.
+        {
+            uintptr_t addr = gameCoreBase + s_profile->getDefRva;
+            bool inText = (addr >= s_textStart && addr < s_textEnd);
+            bool prologue = inText && IsPrologue(addr);
+            Log("  GetModifierDefinition %s (in.text=%d prologue=%d)",
+                (inText && prologue) ? "PASS" : "FAIL",
+                (int)inText, (int)prologue);
+            X10Write::SetStoreLookupProven(inText && prologue);
+            if (!inText || !prologue)
+                Log("STORE LOOKUP UNPROVEN: post-Add witness degraded, writer unaffected");
+        }
         // Transactional X10-only installation: track exactly the hooks WE
         // created/enabled, and unwind only those on failure. Unrelated
         // Community Extension hooks are never disabled or removed here.

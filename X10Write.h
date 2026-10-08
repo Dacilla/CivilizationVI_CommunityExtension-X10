@@ -24,26 +24,35 @@ namespace X10Config {
 
 namespace X10Write {
     void InitBase(uintptr_t base);
-    // A touched argument, reported for post-Add verification.
+    // A touched argument, identified LOGICALLY (modifier ID + argument +
+    // expected value). Deliberately no raw ArgumentDefinition pointer: the
+    // pre-Add element address is not proof of post-Add storage (Add may
+    // move/clear strings; observed live on governor-identity defs).
     struct Touched {
-        void* element;
+        char id[64];
+        char arg[32];
         char expected[32];
-        const char* id;
-        const char* arg;
     };
     // Called from the AddModifierDefinition hook with the raw reference
     // slots (d0 = shared_ptr object). Resolves, writes BEFORE orig_Add, and
     // reports all touched elements for post-Add verification.
     void OnAddModifierDefinition(void* d0, void* d1,
                                  Touched* touched, int maxTouched, int* outCount);
-    // Post-Add witness: re-read every touched element from the live definition.
-    void VerifyStoredAfterAdd(Touched* touched, int count);
+    // Post-Add witness: resolve each touched entry through the registered
+    // ModifierSystem store (engine GetModifierDefinition by ID string) and
+    // compare. Tiers: string retained -> MATCH/MISMATCH; definition found +
+    // ID verified but string blank/absent -> typed-or-consumed (unreadable);
+    // lookup miss/fault -> unreadable. Never MATCH on unproven state.
+    void VerifyStoredAfterAdd(void* system, Touched* touched, int count);
     // Must be called after config lookup succeeds; enables the write path.
     // kErr carries the multiplier's source quantization (FLOAT32 half-ULP,
     // 0 for INT32) for the count-like exactness rule.
     void Arm(double k);
     void Arm(double k, const bool* mods);
     void Arm(double k, const bool* mods, double kErr);
+    // Store-lookup path state (set once at Install from getDefRva
+    // validation; witness-only, never affects the writer path).
+    void SetStoreLookupProven(bool proven);
     // Fail-closed reset at the start of EVERY PopulateModifierDefinitions:
     // clears armed state, k, module flags, and per-population counters.
     void Disarm();
@@ -51,5 +60,9 @@ namespace X10Write {
     long WritesThisPopulate();
     long MismatchesThisPopulate();
     long SkippedThisPopulate();
+    long TransformRefusedThisPopulate();
+    long PostAddMatchThisPopulate();
+    long PostAddMismatchThisPopulate();
+    long PostAddUnreadableThisPopulate();
     bool IsArmed();
 }

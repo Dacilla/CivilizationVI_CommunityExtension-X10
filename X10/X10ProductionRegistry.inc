@@ -381,8 +381,6 @@ static const X10RegistryEntry kX10ProductionRegistry[] = {
     {"TOKUGAWA_TOURISM_DISTRICTS", "Amount", "1", 0, 0, 1},
     {"TOQUI_CULTURE_FROM_GOVERNOR", "Amount", "5", 0, 0, 1},
     {"TOQUI_CULTURE_GOVERNOR_NOT_FOUNDED", "Amount", "15", 0, 0, 1},
-    {"TOQUI_DOMESTIC_LOYALTY", "Amount", "4", 0, 0, 1},
-    {"TOQUI_FOREIGN_LOYALTY", "Amount", "4", 0, 0, 1},
     {"TOQUI_PRODUCTION_FROM_GOVERNOR", "Amount", "5", 0, 0, 1},
     {"TOQUI_PRODUCTION_GOVERNOR_NOT_FOUNDED", "Amount", "15", 0, 0, 1},
     {"TOTALWAR_DOUBLEPILLAGEDISTRICT", "Amount", "50", 0, 0, 2},
@@ -702,4 +700,4 @@ static const X10RegistryEntry kX10ProductionRegistry[] = {
     {"YONGLE_GOLD_POPULATION", "Amount", "2", 0, 0, 1},
     {"YONGLE_SCIENCE_POPULATION", "Amount", "1", 0, 0, 1},
 };
-static const int kX10ProductionRegistryCount = 686;
+static const int kX10ProductionRegistryCount = 684;

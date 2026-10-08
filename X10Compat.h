@@ -14,6 +14,10 @@ struct GameCoreCompatibilityProfile {
     uintptr_t addRva;
     uintptr_t instanceCtorA;
     uintptr_t instanceCtorB;
+    // Engine getter (CALLED, never hooked): ModifierSystem::
+    // GetModifierDefinition(system, out16, idString). Post-Add witness
+    // resolves the registered definition through it; validated like hooks.
+    uintptr_t getDefRva;
     // Config reader RVAs.
     uintptr_t getInstanceRva;
     uintptr_t hashRva;
@@ -50,6 +54,7 @@ static const GameCoreCompatibilityProfile kGameCoreProfiles[] = {
         "user-validated-15038592",
         0x667c6f5b, 0xc60000,
         0x96f6c0, 0x943110, 0x92a4f0, 0x92b220,
+        0x951d90, // ModifierSystem::GetModifierDefinition (call-only)
         0x164c20, 0x606270,
         0x88, 0x80, 0x68,
         {1, 2, 3, 4, 5, 17, 18, 0xFFFF}, // engine mask, verbatim
