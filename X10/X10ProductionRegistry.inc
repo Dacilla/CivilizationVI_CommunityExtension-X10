@@ -836,12 +836,10 @@ static const X10RegistryEntry kX10ProductionRegistry[] = {
     {"X10_BROADWAY_GPP_MUSICIAN", "Amount", "3", 0, 1, 16},
     {"X10_BROADWAY_GPP_WRITER", "Amount", "3", 0, 1, 16},
     {"X10_CASA_DE_CONTRATACION_GPP_MERCHANT", "Amount", "3", 0, 1, 16},
-    {"X10_COLOSSEUM_ENTERTAINMENT", "Amount", "2", 0, 0, 16},
     {"X10_COLOSSEUM_YIELD_CULTURE", "Amount", "2", 0, 0, 16},
     {"X10_COLOSSUS_GPP_ADMIRAL", "Amount", "1", 0, 1, 16},
     {"X10_COLOSSUS_YIELD_GOLD", "Amount", "3", 0, 0, 16},
     {"X10_CRISTO_REDENTOR_YIELD_CULTURE", "Amount", "4", 0, 0, 16},
-    {"X10_ESTADIO_DO_MARACANA_ENTERTAINMENT", "Amount", "2", 0, 0, 16},
     {"X10_ESTADIO_DO_MARACANA_YIELD_CULTURE", "Amount", "6", 0, 0, 16},
     {"X10_ETEMENANKI_YIELD_SCIENCE", "Amount", "2", 0, 0, 16},
     {"X10_FORBIDDEN_CITY_YIELD_CULTURE", "Amount", "5", 0, 0, 16},
@@ -888,4 +886,4 @@ static const X10RegistryEntry kX10ProductionRegistry[] = {
     {"YONGLE_GOLD_POPULATION", "Amount", "2", 0, 0, 1},
     {"YONGLE_SCIENCE_POPULATION", "Amount", "1", 0, 0, 1},
 };
-static const int kX10ProductionRegistryCount = 872;
+static const int kX10ProductionRegistryCount = 870;
