@@ -553,9 +553,9 @@ namespace X10Write {
         }
         __try {
             size_t len = strlen(t->id);
-            if (len == 0 || len > 63) {
+            if (len == 0 || len > sizeof(t->id) - 1) {
                 InterlockedIncrement(&s_postAddUnreadable);
-                X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=<bad-id> expected=%s",
+                X10Lifecycle::X10Log("[X10WRITE] id=%s arg=%s stored_after_add=<verifier-key-too-long> expected=%s",
                        t->id, t->arg, t->expected);
                 return;
             }
@@ -563,7 +563,7 @@ namespace X10Write {
             key.ptr = t->id;
             memset(key.pad, 0, sizeof(key.pad));
             key.size = (uint64_t)len;
-            key.capa = 64; // heap form over our stable Touched storage
+            key.capa = sizeof(t->id); // heap form over our stable Touched storage
             EngineRef out{ nullptr, nullptr };
             auto getFn = reinterpret_cast<GetDefFn>(
                 reinterpret_cast<uint8_t*>(g_base) + prof->getDefRva);

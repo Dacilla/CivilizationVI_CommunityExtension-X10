@@ -28,8 +28,12 @@ namespace X10Write {
     // expected value). Deliberately no raw ArgumentDefinition pointer: the
     // pre-Add element address is not proof of post-Add storage (Add may
     // move/clear strings; observed live on governor-identity defs).
+    // Project invariant: every production modifier ID fits with room to
+    // spare (current max 66 < 256; enforced by a generated registry test).
+    // Over-capacity identity is NEVER silently truncated: it logs
+    // verifier-key-too-long and counts unreadable without attempting lookup.
     struct Touched {
-        char id[64];
+        char id[256];
         char arg[32];
         char expected[32];
     };
