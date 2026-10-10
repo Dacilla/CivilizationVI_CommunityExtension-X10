@@ -261,8 +261,8 @@ namespace X10Write {
     static double g_k = 0;
     static double g_kErr = 0; // source quantization half-ULP of g_k (0 = INT32)
     static bool g_armed = false;
-    static bool s_modEnabled[5] = {true, true,
-        true, true, true}; // traits, policies, governments, pantheons, wonders
+    // traits, policies, governments, pantheons, wonders, governors
+    static bool s_modEnabled[6] = {true, true, true, true, true, true};
     static volatile LONG s_writesSession = 0;
     static volatile LONG s_writesPopulate = 0;
     static volatile LONG s_mismatchesPopulate = 0;
@@ -280,7 +280,7 @@ namespace X10Write {
         g_k = k;
         g_kErr = kErr;
         g_armed = true;
-        for (int i = 0; i < 5; i++) s_modEnabled[i] = mods[i];
+        for (int i = 0; i < 6; i++) s_modEnabled[i] = mods[i];
     }
 
     void Arm(double k, const bool* mods) {
@@ -290,7 +290,8 @@ namespace X10Write {
     // Legacy single-arg arm (probe compat): all supported modules on,
     // zero quantization (strict integer exactness).
     void Arm(double k) {
-        static const bool all[5] = {true, true, true, true, true};
+        static const bool all[6] = {true, true, true, true,
+            true, true};
         Arm(k, all, 0.0);
     }
 
@@ -406,6 +407,7 @@ namespace X10Write {
         if (s_modEnabled[2]) mask |= 4;
         if (s_modEnabled[3]) mask |= 8; // pantheons
         if (s_modEnabled[4]) mask |= 16; // wonders
+        if (s_modEnabled[5]) mask |= 32; // governors
         return mask;
     }
 
