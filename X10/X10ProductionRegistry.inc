@@ -3,7 +3,7 @@
 // Each entry derives from: authoritative official value + runtime k,
 // admitted only via sem-floor agreement or curated override
 // (see civ6x10/rules/certified_overrides.yml + conflict ledger).
-// owners bitmask: 1=traits 2=policies 4=governments 8=pantheons 16=wonders 32=governors.
+// owners bitmask: 1=traits 2=policies 4=governments 8=pantheons 16=wonders 32=governors 64=suzerain.
 // A shared entry applies only when ALL owning modules are enabled.
 #pragma once
 struct X10RegistryEntry {
@@ -391,6 +391,53 @@ static const X10RegistryEntry kX10ProductionRegistry[] = {
     {"MILITARYRESEARCH_MILITARY_ACADEMY_SCIENCE_MODIFIER", "Amount", "2", 0, 1, 2},
     {"MILITARYRESEARCH_RENAISSANCE_WALLS_SCIENCE_MODIFIER", "Amount", "2", 0, 1, 2},
     {"MILITARYRESEARCH_SEAPORT_SCIENCE_MODIFIER", "Amount", "2", 0, 1, 2},
+    {"MINOR_CIV_ANTANANARIVO_CULTURE_FROM_EARNED_GREAT_PEOPLE_BONUS", "Amount", "2", 0, 0, 64},
+    {"MINOR_CIV_ANTIOCH_LUXURY_TRADE_ROUTE_BONUS", "Amount", "1", 0, 0, 64},
+    {"MINOR_CIV_AUCKLAND_SHALLOW_WATER_PRODUCTION_BONUS_BASE", "Amount", "1", 0, 0, 64},
+    {"MINOR_CIV_AUCKLAND_SHALLOW_WATER_PRODUCTION_BONUS_INDUSTRIAL", "Amount", "1", 0, 0, 64},
+    {"MINOR_CIV_BABYLON_GREAT_WORK_ARTIFACT_SCIENCE", "YieldChange", "1", 0, 0, 64},
+    {"MINOR_CIV_BABYLON_GREAT_WORK_RELIC_SCIENCE", "YieldChange", "1", 0, 0, 64},
+    {"MINOR_CIV_BABYLON_GREAT_WORK_WRITING_SCIENCE", "YieldChange", "2", 0, 0, 64},
+    {"MINOR_CIV_BOLOGNA_GREAT_ADMIRAL_POINTS_BONUS", "Amount", "1", 0, 1, 64},
+    {"MINOR_CIV_BOLOGNA_GREAT_ARTIST_POINTS_BONUS", "Amount", "1", 0, 1, 64},
+    {"MINOR_CIV_BOLOGNA_GREAT_ENGINEER_POINTS_BONUS", "Amount", "1", 0, 1, 64},
+    {"MINOR_CIV_BOLOGNA_GREAT_GENERAL_POINTS_BONUS", "Amount", "1", 0, 1, 64},
+    {"MINOR_CIV_BOLOGNA_GREAT_MERCHANT_POINTS_BONUS", "Amount", "1", 0, 1, 64},
+    {"MINOR_CIV_BOLOGNA_GREAT_MUSICIAN_POINTS_BONUS", "Amount", "1", 0, 1, 64},
+    {"MINOR_CIV_BOLOGNA_GREAT_PROPHET_POINTS_BONUS", "Amount", "1", 0, 1, 64},
+    {"MINOR_CIV_BOLOGNA_GREAT_SCIENTIST_POINTS_BONUS", "Amount", "1", 0, 1, 64},
+    {"MINOR_CIV_BOLOGNA_GREAT_WRITER_POINTS_BONUS", "Amount", "1", 0, 1, 64},
+    {"MINOR_CIV_BRUSSELS_WONDER_PRODUCTION_BONUS", "Amount", "15", 0, 0, 64},
+    {"MINOR_CIV_BUENOS_AIRES_BONUS_RESOURCE_AMENITY_BONUS", "Amount", "1", 0, 0, 64},
+    {"MINOR_CIV_CHINGUETTI_FAITH_FOLLOWERS", "Amount", "1", 0, 0, 64},
+    {"MINOR_CIV_FEZ_INITIATION_SCIENCE_POPULATION", "Amount", "20", 0, 0, 64},
+    {"MINOR_CIV_GENEVA_SCIENCE_AT_PEACE_BONUS", "Amount", "15", 0, 0, 64},
+    {"MINOR_CIV_HONG_KONG_PROJECT_PRODUCTION_BONUS", "Amount", "20", 0, 0, 64},
+    {"MINOR_CIV_HUNZA_GOLD_FROM_TRADE_ROUTE_LENGTH", "Amount", "0.2", 0, 0, 64},
+    {"MINOR_CIV_JAKARTA_TRADING_POST_BONUS", "Amount", "1", 0, 0, 64},
+    {"MINOR_CIV_JOHANNESBURG_PRODUCTION_RESOURCES", "Amount", "1", 0, 0, 64},
+    {"MINOR_CIV_JOHANNESBURG_PRODUCTION_RESOURCES_LATE", "Amount", "1", 0, 0, 64},
+    {"MINOR_CIV_KABUL_UNIT_EXPERIENCE_BONUS", "Amount", "100", 0, 0, 64},
+    {"MINOR_CIV_KUMASI_CULTURE_TRADE_ROUTE_YIELD_BONUS", "Amount", "2", 0, 0, 64},
+    {"MINOR_CIV_KUMASI_GOLD_TRADE_ROUTE_YIELD_BONUS", "Amount", "1", 0, 0, 64},
+    {"MINOR_CIV_MUSCAT_COMMERCIAL_HUB_AMENITY_BONUS", "Amount", "1", 0, 0, 64},
+    {"MINOR_CIV_NAN_MADOL_DISTRICTS_CULTURE_BONUS", "Amount", "2", 0, 0, 64},
+    {"MINOR_CIV_NGAZARGAMU_ARMORY_PURCHASE_BONUS", "Amount", "20", 3, 0, 64},
+    {"MINOR_CIV_NGAZARGAMU_BARRACKS_STABLE_PURCHASE_BONUS", "Amount", "20", 3, 0, 64},
+    {"MINOR_CIV_NGAZARGAMU_MILITARY_ACADEMY_PURCHASE_BONUS", "Amount", "20", 3, 0, 64},
+    {"MINOR_CIV_PALENQUE_CAMPUS_GROWTH_BONUS", "Amount", "15", 0, 0, 64},
+    {"MINOR_CIV_SAMARKAND_TRADE_GOLD_MODIFIER", "Amount", "1", 0, 0, 64},
+    {"MINOR_CIV_SINGAPORE_PRODUCTION_PER_MAJOR_TRADE_PARTNER", "Amount", "2", 0, 0, 64},
+    {"MINOR_CIV_TARUGA_ALUMINUM_RESOURCE_SCIENCE", "Amount", "5", 0, 0, 64},
+    {"MINOR_CIV_TARUGA_COAL_RESOURCE_SCIENCE", "Amount", "5", 0, 0, 64},
+    {"MINOR_CIV_TARUGA_HORSES_RESOURCE_SCIENCE", "Amount", "5", 0, 0, 64},
+    {"MINOR_CIV_TARUGA_IRON_RESOURCE_SCIENCE", "Amount", "5", 0, 0, 64},
+    {"MINOR_CIV_TARUGA_NITER_RESOURCE_SCIENCE", "Amount", "5", 0, 0, 64},
+    {"MINOR_CIV_TARUGA_OIL_RESOURCE_SCIENCE", "Amount", "5", 0, 0, 64},
+    {"MINOR_CIV_TARUGA_URANIUM_RESOURCE_SCIENCE", "Amount", "5", 0, 0, 64},
+    {"MINOR_CIV_VILNIUS_ALLIANCE_LEVEL_1", "Amount", "50", 0, 0, 64},
+    {"MINOR_CIV_VILNIUS_ALLIANCE_LEVEL_2", "Amount", "50", 0, 0, 64},
+    {"MINOR_CIV_VILNIUS_ALLIANCE_LEVEL_3", "Amount", "50", 0, 0, 64},
     {"MONARCHY_CASTLE_HOUSING", "Amount", "1", 0, 0, 6},
     {"MONARCHY_ENVOYS", "Amount", "50", 0, 0, 4},
     {"MONARCHY_STARFORT_FAVOR", "Amount", "2", 0, 0, 6},
@@ -940,4 +987,4 @@ static const X10RegistryEntry kX10ProductionRegistry[] = {
     {"YONGLE_SCIENCE_POPULATION", "Amount", "1", 0, 0, 1},
     {"ZONING_COMMISSIONER_FASTER_DISTRICT_CONSTRUCTION", "Amount", "20", 0, 0, 32},
 };
-static const int kX10ProductionRegistryCount = 924;
+static const int kX10ProductionRegistryCount = 971;
