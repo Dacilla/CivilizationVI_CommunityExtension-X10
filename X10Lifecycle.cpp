@@ -174,10 +174,10 @@ namespace X10Lifecycle {
             X10Write::Disarm();
             double k = 0;
             double kErr = 0;
-            // Production multiplier (probe key still honored for experiments).
-            bool haveK = X10Config::TryGetMultiplier("X10_MULTIPLIER", k, kErr);
-            if (!haveK)
-                haveK = X10Config::TryGetProbeKEx(k, kErr);
+            // Effective multiplier: preset dropdown, Custom value, legacy
+            // X10_MULTIPLIER fallback (plus X10_PROBE_K experiment key).
+            // Present-but-invalid preset/custom fails closed inside.
+            bool haveK = X10Config::ResolveEffectiveMultiplier(k, kErr);
             if (haveK && k == 0) {
                 Log("X10 multiplier 0: controller OFF (definitions untouched)");
                 haveK = false;

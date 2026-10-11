@@ -133,6 +133,153 @@ namespace X10Config {
         return TryGetMultiplier(key, out, err);
     }
 
+    // ---- Phase 7C.2 configuration-state model (declared in X10Write.h;
+    // ABSENT = no variant, UNSET = type-0/flags-0/zero-payload null shape,
+    // VALID, INVALID). Type 0 is absent from the verbatim engine int mask,
+    // so it can never decode as INT32 0.
+    static bool IsUnsetConfigVariant(unsigned type, uint32_t flags,
+                                     bool payloadZero) {
+        return type == 0 && flags == 0 && payloadZero;
+    }
+
+    ConfigState FindConfigState(const char* key, unsigned* typeOut,
+                                uint32_t* flagsOut) {
+        if (typeOut) *typeOut = 0xFFFF;
+        if (flagsOut) *flagsOut = 0;
+        void* variant = FindConfigVariant(key);
+        if (!variant) return ConfigState::ABSENT;
+        auto* prof = X10Lifecycle::ActiveProfile();
+        if (!prof) return ConfigState::ABSENT;
+        uint16_t type = 0xFFFF;
+        uint32_t flags = 0;
+        uint32_t payload = 0;
+        __try {
+            uint8_t* v = reinterpret_cast<uint8_t*>(variant);
+            type = *reinterpret_cast<uint16_t*>(v + prof->variantTypeOff);
+            flags = *reinterpret_cast<uint32_t*>(v + prof->variantFlagsOff);
+            payload = *reinterpret_cast<uint32_t*>(v + prof->variantPayloadOff);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return ConfigState::INVALID;
+        }
+        if (typeOut) *typeOut = type;
+        if (flagsOut) *flagsOut = flags;
+        if (type == 0 && flags == 0)
+            return IsUnsetConfigVariant(type, flags, payload == 0) ?
+                ConfigState::UNSET : ConfigState::INVALID;
+        return ConfigState::VALID;
+    }
+
+    // Strict boolean reader over the PROVEN integer scalar path (native
+    // bool SetupParameters arrive as integer variants; no raw BOOL payload
+    // decoding is invented). Exact 0 -> false, exact 1 -> true; anything
+    // else numeric is INVALID. ABSENT/UNSET are reported (not defaulted)
+    // so callers apply declared-mod-default policy explicitly.
+    bool TryGetConfigBool(const char* key, bool& out, ConfigState& stOut) {
+        out = false;
+        stOut = FindConfigState(key, nullptr, nullptr);
+        if (stOut != ConfigState::VALID) return false;
+        double d = 0;
+        unsigned vtype = 0xFFFF;
+        uint32_t vflags = 0;
+        const char* kind = "unknown";
+        if (!VariantToDouble(
+                FindConfigVariant(key), d, vtype, vflags, &kind)) {
+            stOut = ConfigState::INVALID;
+            return false;
+        }
+        if (d == 0.0) { out = false; return true; }
+        if (d == 1.0) { out = true; return true; }
+        X10Lifecycle::X10Log("CONFIG key=%s non-boolean numeric %g: rejected",
+               key, d);
+        stOut = ConfigState::INVALID;
+        return false;
+    }
+
+    // Strict preset reader: exactly the shipped dropdown values. 101 is
+    // Custom (not a multiplier) and never passes through the 0-100
+    // multiplier range check. Any other integer is INVALID.
+    bool TryGetMultiplierPreset(const char* key, int& presetOut,
+                                ConfigState& stOut) {
+        presetOut = -1;
+        stOut = FindConfigState(key, nullptr, nullptr);
+        if (stOut != ConfigState::VALID) return false;
+        double d = 0;
+        unsigned vtype = 0xFFFF;
+        uint32_t vflags = 0;
+        const char* kind = "unknown";
+        if (!VariantToDouble(
+                FindConfigVariant(key), d, vtype, vflags, &kind)) {
+            stOut = ConfigState::INVALID;
+            return false;
+        }
+        static const int kAllowed[] = {0, 2, 3, 5, 10, 20, 50, 100, 101};
+        for (size_t i = 0; i < sizeof(kAllowed) / sizeof(kAllowed[0]); i++) {
+            if (d == (double)kAllowed[i]) {
+                presetOut = kAllowed[i];
+                return true;
+            }
+        }
+        X10Lifecycle::X10Log("CONFIG preset %s non-preset value %g: rejected",
+               key, d);
+        stOut = ConfigState::INVALID;
+        return false;
+    }
+
+    // Effective-multiplier resolution (Phase 7C.2, specified order):
+    // 1. new preset VALID standard value -> use it (Off included);
+    // 2. preset 101 (Custom) -> require valid custom numeric 0-100;
+    // 3. preset ABSENT/UNSET -> legacy X10_MULTIPLIER path (INT32/FLOAT32
+    //    as proven, plus the X10_PROBE_K experiment fallback);
+    // 4. preset present-but-INVALID, or Custom blank/malformed/out-of-range
+    //    -> fail closed with an explicit reason (never silent fallback,
+    //    never clamp/round, never garbage-as-zero). Returns true iff X10
+    //    should arm with *kOut (k==0 is normalized to disarmed by the
+    //    caller, matching the long-standing k==0 convention).
+    bool ResolveEffectiveMultiplier(double& kOut, double& kErrOut) {
+        kOut = 0;
+        kErrOut = 0;
+        int preset = -1;
+        ConfigState pst = ConfigState::ABSENT;
+        if (TryGetMultiplierPreset("X10_MULTIPLIER_PRESET", preset, pst)) {
+            if (preset == 101) {
+                double ck = 0;
+                double ckErr = 0;
+                if (TryGetMultiplier("X10_MULTIPLIER", ck, ckErr)) {
+                    kOut = ck;
+                    kErrOut = ckErr;
+                    X10Lifecycle::X10Log("X10 effective multiplier: custom %g",
+                           ck);
+                    return true;
+                }
+                X10Lifecycle::X10Log("X10 Custom selected but X10_MULTIPLIER "
+                       "is blank, malformed, or outside 0-100 "
+                       "(decimals need a period, e.g. 7.3): "
+                       "X10 remains disabled for safety");
+                return false;
+            }
+            if (preset == 0) {
+                X10Lifecycle::X10Log("X10 multiplier preset OFF; "
+                       "definition transforms disabled");
+                return false;
+            }
+            kOut = (double)preset;
+            kErrOut = 0;
+            X10Lifecycle::X10Log("X10 effective multiplier: preset %d",
+                   preset);
+            return true;
+        }
+        if (pst == ConfigState::ABSENT || pst == ConfigState::UNSET) {
+            if (TryGetMultiplier("X10_MULTIPLIER", kOut, kErrOut))
+                return true;
+            if (TryGetProbeKEx(kOut, kErrOut))
+                return true;
+            return false;
+        }
+        X10Lifecycle::X10Log("X10 preset present but invalid: no legacy "
+               "fallback; X10 remains disabled for safety");
+        return false;
+    }
+
     // Multiplier read with source quantization: kErr is the FLOAT32
     // half-ULP of the stored k (0 for INT32 multipliers), consumed by the
     // count-like exactness rule so stored-float k still accepts exact
@@ -233,18 +380,19 @@ namespace X10Config {
         for (char* p = full; *p; p++) {
             if (*p >= 'a' && *p <= 'z') *p -= 32;
         }
-        // Absent key: default per declared mod defaults, loudly.
-        // A present-but-unreadable key fails closed (disabled).
-        if (!FindConfigVariant(full)) {
-            X10Lifecycle::X10Log("CONFIG module %s absent: default %s", moduleKey,
-                   defaultOn ? "ON" : "OFF");
-            return defaultOn;
-        }
-        double d = 0;
-        if (TryGetConfigDouble(full, d)) {
-            bool on = (d != 0);
+        // Absent or UNSET key: default per declared mod defaults, loudly.
+        // A present-but-unreadable key fails closed (disabled). Strict bool
+        // decoding also accepts the legacy INT32 0/1 module parameters.
+        bool on = false;
+        ConfigState st = ConfigState::ABSENT;
+        if (TryGetConfigBool(full, on, st)) {
             X10Lifecycle::X10Log("CONFIG module %s %s", moduleKey, on ? "ON" : "OFF");
             return on;
+        }
+        if (st == ConfigState::ABSENT || st == ConfigState::UNSET) {
+            X10Lifecycle::X10Log("CONFIG module %s absent/unset: default %s", moduleKey,
+                   defaultOn ? "ON" : "OFF");
+            return defaultOn;
         }
         X10Lifecycle::X10Log("CONFIG module %s unreadable: disabled (fail-closed)",
                moduleKey);

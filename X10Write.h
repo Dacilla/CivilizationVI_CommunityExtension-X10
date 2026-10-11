@@ -9,6 +9,9 @@
 #include <cstdint>
 
 namespace X10Config {
+    // Reader state model (Phase 7C.2): ABSENT (no variant), UNSET
+    // (type-0/flags-0/zero-payload null shape), VALID, INVALID.
+    enum class ConfigState { ABSENT, UNSET, VALID, INVALID };
     // Generic validated config-double reader. Logs CONFIG lines either way.
     bool TryGetConfigDouble(const char* key, double& out);
     // Multiplier read with source quantization: kErrOut is the FLOAT32
@@ -17,8 +20,21 @@ namespace X10Config {
     // Probe compat (X10_PROBE_K).
     bool TryGetProbeK(double& out);
     bool TryGetProbeKEx(double& out, double& kErrOut);
-    // Module toggle: numeric 1/0; absent key means default-ON (matching the
-    // mod's declared defaults) and is logged.
+    // State-aware variant classification (narrow UNSET shape required).
+    ConfigState FindConfigState(const char* key, unsigned* typeOut,
+                                uint32_t* flagsOut);
+    // Strict bool over the proven integer scalar path: exact 0/1 only;
+    // ABSENT/UNSET reported (not defaulted); all else INVALID.
+    bool TryGetConfigBool(const char* key, bool& out, ConfigState& stOut);
+    // Strict preset: exactly 0,2,3,5,10,20,50,100,101(Custom).
+    bool TryGetMultiplierPreset(const char* key, int& presetOut,
+                                ConfigState& stOut);
+    // Ordered resolution: preset -> Custom -> legacy -> fail closed.
+    // Returns true iff X10 should arm with *kOut.
+    bool ResolveEffectiveMultiplier(double& kOut, double& kErrOut);
+    // Module toggle: strict bool (legacy INT32 0/1 accepted); absent or
+    // UNSET means default-ON (matching the mod's declared defaults) and
+    // is logged.
     bool ModuleEnabled(const char* moduleKey, bool defaultOn);
 }
 
