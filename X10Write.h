@@ -84,5 +84,7 @@ namespace X10Write {
     long PostAddMatchThisPopulate();
     long PostAddMismatchThisPopulate();
     long PostAddUnreadableThisPopulate();
+    // Inert-by-design REPEAT copies (not writes, not failures).
+    long RepeatIdleThisPopulate();
     bool IsArmed();
 }

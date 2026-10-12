@@ -183,9 +183,12 @@ namespace X10Lifecycle {
                 haveK = false;
             }
             if (haveK) {
-                // Seven supported modules: traits, policies, governments,
-                // pantheons, wonders, governors (bit 32), suzerain (bit 64).
-                bool mods[7] = {
+                // Thirteen supported modules (Phase 8B): traits, policies,
+                // governments, pantheons, wonders, governors (bit 32),
+                // suzerain (bit 64), promotions (128), dedications (256),
+                // modes (512), religion (1024), greatpeople (2048),
+                // projects (4096).
+                bool mods[13] = {
                     X10Config::ModuleEnabled("traits", true),
                     X10Config::ModuleEnabled("policies", true),
                     X10Config::ModuleEnabled("governments", true),
@@ -193,20 +196,27 @@ namespace X10Lifecycle {
                     X10Config::ModuleEnabled("wonders", true),
                     X10Config::ModuleEnabled("governors", true),
                     X10Config::ModuleEnabled("suzerain", true),
+                    X10Config::ModuleEnabled("promotions", true),
+                    X10Config::ModuleEnabled("dedications", true),
+                    X10Config::ModuleEnabled("modes", true),
+                    X10Config::ModuleEnabled("religion", true),
+                    X10Config::ModuleEnabled("greatpeople", true),
+                    X10Config::ModuleEnabled("projects", true),
                 };
                 X10Write::Arm(k, mods, kErr);
             } else {
                 Log("X10 writes DISABLED for this session (no native k)");
             }
             orig_Populate(pDB, modifierSystem);
-            Log("PopulateModifierDefinitions EXIT depth=%ld definitions_added=%ld writes=%ld transform_refused=%ld official_mismatch=%ld post_add_match=%ld post_add_mismatch=%ld post_add_unreadable=%ld skipped_other=%ld",
+            Log("PopulateModifierDefinitions EXIT depth=%ld definitions_added=%ld writes=%ld transform_refused=%ld official_mismatch=%ld post_add_match=%ld post_add_mismatch=%ld post_add_unreadable=%ld skipped_other=%ld repeat_idle=%ld",
                 s_populateDepth, s_addCount, X10Write::WritesThisPopulate(),
                 X10Write::TransformRefusedThisPopulate(),
                 X10Write::MismatchesThisPopulate(),
                 X10Write::PostAddMatchThisPopulate(),
                 X10Write::PostAddMismatchThisPopulate(),
                 X10Write::PostAddUnreadableThisPopulate(),
-                X10Write::SkippedThisPopulate());
+                X10Write::SkippedThisPopulate(),
+                X10Write::RepeatIdleThisPopulate());
             // Never remain armed outside the population window.
             X10Write::Disarm();
             InterlockedDecrement(&s_populateDepth);

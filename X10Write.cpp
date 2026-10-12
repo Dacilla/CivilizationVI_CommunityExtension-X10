@@ -409,8 +409,11 @@ namespace X10Write {
     static double g_k = 0;
     static double g_kErr = 0; // source quantization half-ULP of g_k (0 = INT32)
     static bool g_armed = false;
-    // traits, policies, governments, pantheons, wonders, governors, suzerain
-    static bool s_modEnabled[7] = {true, true, true, true, true, true, true};
+    // 13 supported modules (Phase 8B): traits, policies, governments,
+    // pantheons, wonders, governors, suzerain, promotions, dedications,
+    // modes, religion, greatpeople, projects.
+    static bool s_modEnabled[13] = {true, true, true, true, true, true, true,
+                                    true, true, true, true, true, true};
     static volatile LONG s_writesSession = 0;
     static volatile LONG s_writesPopulate = 0;
     static volatile LONG s_mismatchesPopulate = 0;
@@ -419,6 +422,9 @@ namespace X10Write {
     static volatile LONG s_postAddMatch = 0;
     static volatile LONG s_postAddMismatch = 0;
     static volatile LONG s_postAddUnreadable = 0;
+    // REPEAT copies left inert by design (copy index above integral k):
+    // neither writes nor failures, counted separately for validation.
+    static volatile LONG s_repeatIdle = 0;
     // Store-lookup path proven at Install (getDefRva validated). When false,
     // Verify degrades loudly: every touched entry counts unreadable, never
     // MATCH. The writer path is unaffected.
@@ -428,7 +434,7 @@ namespace X10Write {
         g_k = k;
         g_kErr = kErr;
         g_armed = true;
-        for (int i = 0; i < 7; i++) s_modEnabled[i] = mods[i];
+        for (int i = 0; i < 13; i++) s_modEnabled[i] = mods[i];
     }
 
     void Arm(double k, const bool* mods) {
@@ -438,8 +444,8 @@ namespace X10Write {
     // Legacy single-arg arm (probe compat): all supported modules on,
     // zero quantization (strict integer exactness).
     void Arm(double k) {
-        static const bool all[7] = {true, true, true, true,
-            true, true, true};
+        static const bool all[13] = {true, true, true, true, true, true, true,
+            true, true, true, true, true, true};
         Arm(k, all, 0.0);
     }
 
@@ -454,6 +460,7 @@ namespace X10Write {
         s_postAddMatch = 0;
         s_postAddMismatch = 0;
         s_postAddUnreadable = 0;
+        s_repeatIdle = 0;
     }
 
     bool IsArmed() { return g_armed; }
@@ -467,6 +474,7 @@ namespace X10Write {
     long PostAddMatchThisPopulate() { return (long)s_postAddMatch; }
     long PostAddMismatchThisPopulate() { return (long)s_postAddMismatch; }
     long PostAddUnreadableThisPopulate() { return (long)s_postAddUnreadable; }
+    long RepeatIdleThisPopulate() { return (long)s_repeatIdle; }
 
     static bool BoundedStringRead(void* s, char* out, size_t cap,
                                   size_t& lenOut);
@@ -549,14 +557,12 @@ namespace X10Write {
     }
 
     static int EnabledOwnerMask() {
+        // Loop-built: proves bits >= 0x80 and >= 0x100 behave identically
+        // to the original seven (no silent truncation; int holds to 2^30).
         int mask = 0;
-        if (s_modEnabled[0]) mask |= 1;
-        if (s_modEnabled[1]) mask |= 2;
-        if (s_modEnabled[2]) mask |= 4;
-        if (s_modEnabled[3]) mask |= 8; // pantheons
-        if (s_modEnabled[4]) mask |= 16; // wonders
-        if (s_modEnabled[5]) mask |= 32; // governors
-        if (s_modEnabled[6]) mask |= 64; // suzerain
+        for (int i = 0; i < 13; i++) {
+            if (s_modEnabled[i]) mask |= (1 << i);
+        }
         return mask;
     }
 
@@ -599,19 +605,94 @@ namespace X10Write {
                     char before[64] = {};
                     size_t beforeLen = 0;
                     if (!SsoRead(el + prof->argValueOff, before, sizeof(before), beforeLen)) continue;
-                    if (strcmp(before, e.official) != 0) {
+                    if (e.kind == 6 /*REPEAT*/) {
+                        // Implicit-+1 slot grants: copies are stored inert
+                        // (SLOT_NONE). Copy N activates iff N <= integral k
+                        // by rewriting to the real slot type; otherwise it
+                        // stays inert (vanilla single slot). Fail closed on
+                        // any drift, non-integral k, or bad aux/target.
+                        static const char* kInert = "SLOT_NONE";
+                        if (strcmp(before, e.official) != 0 ||
+                                strcmp(before, kInert) != 0) {
+                            InterlockedIncrement(&s_mismatchesPopulate);
+                            X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s repeat-not-inert(saw %s) skipped",
+                                   e.modifierId, e.argument, before);
+                            continue;
+                        }
+                        int copies = X10Transforms::RepeatCopies(
+                            g_k, g_kErr, 99);
+                        if (copies < 0) {
+                            InterlockedIncrement(&s_transformRefused);
+                            X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s repeat-refused (non-integral k=%.6g) skipped",
+                                   e.modifierId, e.argument, g_k);
+                            continue;
+                        }
+                        if (e.aux < 2 || e.aux > 100 || !e.target ||
+                                !*e.target) {
+                            InterlockedIncrement(&s_skippedPopulate);
+                            X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s repeat-bad-aux skipped",
+                                   e.modifierId, e.argument);
+                            continue;
+                        }
+                        if (e.aux > copies + 1) {
+                            InterlockedIncrement(&s_repeatIdle);
+                            continue;  // stays inert by design, no log spam
+                        }
+                        if (!SsoWrite(el + prof->argValueOff, e.target)) {
+                            InterlockedIncrement(&s_skippedPopulate);
+                            X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s repeat-write-refused (not SSO-safe)", e.modifierId, e.argument);
+                            continue;
+                        }
+                        char after[64] = {};
+                        size_t afterLen = 0;
+                        SsoRead(el + prof->argValueOff, after, sizeof(after), afterLen);
+                        InterlockedIncrement(&s_writesSession);
+                        InterlockedIncrement(&s_writesPopulate);
+                        X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s official=%s k=%.6g transform=REPEAT requested=%s before=%s after=%s phase=definition-population",
+                               e.modifierId, e.argument, e.official, g_k, e.target, before, after);
+                        if (n < maxTouched) {
+                            strncpy(touched[n].id, id, sizeof(touched[n].id) - 1);
+                            touched[n].id[sizeof(touched[n].id) - 1] = '\0';
+                            strncpy(touched[n].arg, e.argument, sizeof(touched[n].arg) - 1);
+                            touched[n].arg[sizeof(touched[n].arg) - 1] = '\0';
+                            strncpy(touched[n].expected, e.target, sizeof(touched[n].expected) - 1);
+                            touched[n].expected[sizeof(touched[n].expected) - 1] = '\0';
+                        }
+                        n++;
+                        continue;
+                    }
+                    if (e.kind == 5 /*DELTA*/) {
+                        // Non-destructive bridge helper: stored inert ("0"),
+                        // official base in e.official. Anything else stored
+                        // is drift (mismatch), never recomputed.
+                        if (strcmp(before, "0") != 0) {
+                            InterlockedIncrement(&s_mismatchesPopulate);
+                            X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s delta-not-inert(expected 0, saw %s) skipped",
+                                   e.modifierId, e.argument, before);
+                            continue;
+                        }
+                    } else if (strcmp(before, e.official) != 0) {
                         InterlockedIncrement(&s_mismatchesPopulate);
                         X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s official-mismatch(expected %s, saw %s) skipped",
                                e.modifierId, e.argument, e.official, before);
                         continue;
                     }
-                    double official = strtod(before, nullptr);
+                    double official = strtod(
+                        (e.kind == 5) ? e.official : before, nullptr);
                     char replacement[32] = {};
-                    static const char* kNames[] = {"ADDITIVE", "COMBAT", "PROBABILITY", "DISCOUNT"};
-                    const char* tname = (e.kind >= 0 && e.kind <= 3) ? kNames[e.kind] : "?";
-                    if (!X10Transforms::Apply(e.kind, official, g_k, g_kErr,
-                                              e.countLike != 0,
-                                              replacement, sizeof(replacement))) {
+                    static const char* kNames[] = {"ADDITIVE", "COMBAT", "PROBABILITY", "DISCOUNT",
+                        "VECTOR", "DELTA", "REPEAT"};
+                    const char* tname = (e.kind >= 0 && e.kind <= 6) ? kNames[e.kind] : "?";
+                    bool applied;
+                    if (e.kind == 4 /*VECTOR*/) {
+                        applied = X10Transforms::ApplyVector(
+                            before, g_k, replacement, sizeof(replacement));
+                    } else {
+                        applied = X10Transforms::Apply(e.kind, official, g_k, g_kErr,
+                                                  e.countLike != 0,
+                                                  replacement, sizeof(replacement));
+                    }
+                    if (!applied) {
                         InterlockedIncrement(&s_transformRefused);
                         X10Lifecycle::X10Log("[X10WRITE] modifier=%s arg=%s transform-refused kind=%s skipped",
                                e.modifierId, e.argument, tname);
